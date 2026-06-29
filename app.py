@@ -244,19 +244,25 @@ def chart(fig: go.Figure, height: int = 400, **kw) -> go.Figure:
 def get_db():
     engine = init_database()
     from sqlalchemy import text
+    from datetime import date, timedelta
+
     with engine.connect() as conn:
-        n = conn.execute(text("SELECT COUNT(*) FROM fact_prix")).scalar()
-    if n == 0:
+        n        = conn.execute(text("SELECT COUNT(*) FROM fact_prix")).scalar()
+        last_row = conn.execute(text("SELECT MAX(date_cours) FROM fact_prix")).scalar()
+
+    # Recharge si : vide OU données de plus de 5 jours
+    last_date  = pd.to_datetime(last_row).date() if last_row else None
+    data_stale = (last_date is None) or (last_date < date.today() - timedelta(days=5))
+
+    if n == 0 or data_stale:
         from src.load_to_sql import load_prices
-        # Essaie Yahoo Finance en premier (fonctionne sur Streamlit Cloud)
         try:
             from src.ingest.fetch_yfinance import fetch_market_data
-            df = fetch_market_data(period="2y")
+            df = fetch_market_data()
             if df.empty:
-                raise ValueError("Aucune donnée Yahoo Finance")
+                raise ValueError("Yahoo Finance vide")
             load_prices(engine, df)
         except Exception:
-            # Fallback : données démo si réseau bloqué (bureau)
             from src.ingest.generate_demo_data import generate_demo_data
             load_prices(engine, generate_demo_data(days=500))
     return engine
@@ -346,10 +352,19 @@ def sidebar(df: pd.DataFrame):
 
     sb.markdown(f'<hr style="border-color:{BORDER};margin:12px 0 8px;"/>', unsafe_allow_html=True)
     if sb.button("🔄  Rafraîchir les données"):
-        from src.ingest.generate_demo_data import generate_demo_data
         from src.load_to_sql import load_prices
-        load_prices(get_db(), generate_demo_data(days=500))
+        with st.spinner("Téléchargement Yahoo Finance…"):
+            try:
+                from src.ingest.fetch_yfinance import fetch_market_data
+                df = fetch_market_data()
+                if df.empty:
+                    raise ValueError("vide")
+                load_prices(get_db(), df)
+            except Exception:
+                from src.ingest.generate_demo_data import generate_demo_data
+                load_prices(get_db(), generate_demo_data(days=500))
         st.cache_data.clear()
+        st.cache_resource.clear()
         st.rerun()
 
     return sel, dr, page
