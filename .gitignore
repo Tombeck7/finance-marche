@@ -1,0 +1,43 @@
+# Environnement Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+
+# Base de données locale
+*.db
+*.sqlite
+*.sqlite3
+
+# Variables d'environnement
+.env
+config/*.env
+!config/settings.example.env
+
+# Données exportées
+data/exports/
+*.csv
+*.xlsx
+
+# Streamlit cache
+.streamlit/secrets.toml
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.idea/
+.vscode/settings.json
+*.suo
+*.user
+
+# Temporaire
+validate.py
+debug*.py
+check_rgba.py
