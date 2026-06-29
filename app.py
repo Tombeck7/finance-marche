@@ -243,16 +243,22 @@ def chart(fig: go.Figure, height: int = 400, **kw) -> go.Figure:
 @st.cache_resource(show_spinner=False)
 def get_db():
     engine = init_database()
-    try:
-        from sqlalchemy import text
-        with engine.connect() as conn:
-            n = conn.execute(text("SELECT COUNT(*) FROM fact_prix")).scalar()
-        if n == 0:
-            raise ValueError("empty")
-    except Exception:
-        from src.ingest.generate_demo_data import generate_demo_data
+    from sqlalchemy import text
+    with engine.connect() as conn:
+        n = conn.execute(text("SELECT COUNT(*) FROM fact_prix")).scalar()
+    if n == 0:
         from src.load_to_sql import load_prices
-        load_prices(engine, generate_demo_data(days=500))
+        # Essaie Yahoo Finance en premier (fonctionne sur Streamlit Cloud)
+        try:
+            from src.ingest.fetch_yfinance import fetch_market_data
+            df = fetch_market_data(period="2y")
+            if df.empty:
+                raise ValueError("Aucune donnée Yahoo Finance")
+            load_prices(engine, df)
+        except Exception:
+            # Fallback : données démo si réseau bloqué (bureau)
+            from src.ingest.generate_demo_data import generate_demo_data
+            load_prices(engine, generate_demo_data(days=500))
     return engine
 
 
