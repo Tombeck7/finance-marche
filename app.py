@@ -18,7 +18,7 @@ from src.structured.pages import (
 
 # ── Config ────────────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="FM Dashboard", page_icon="📈",
+    page_title="Entretien Tom Generali", page_icon="📈",
     layout="wide", initial_sidebar_state="expanded",
 )
 
@@ -320,8 +320,9 @@ def sidebar(df: pd.DataFrame):
 
     sb.markdown(f"""
     <div style="padding:22px 18px 14px;border-bottom:1px solid {BORDER};margin-bottom:10px;">
-      <div style="font-size:21px;font-weight:800;color:{ACCENT};letter-spacing:-.02em;line-height:1.1;">FM Dashboard</div>
-      <div style="font-size:11px;color:{MUTED};margin-top:3px;">Finance de Marché · Pro</div>
+      <div style="font-size:17px;font-weight:800;color:{ACCENT};letter-spacing:-.02em;line-height:1.2;">Entretien Tom</div>
+      <div style="font-size:13px;font-weight:700;color:{TEXT};margin-top:1px;">Generali</div>
+      <div style="font-size:10px;color:{MUTED};margin-top:2px;">Finance de Marché · Produits Structurés</div>
     </div>""", unsafe_allow_html=True)
 
     # ── Filtres ──

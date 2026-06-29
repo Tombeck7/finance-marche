@@ -1,0 +1,53 @@
+// Mesures DAX — Risque et volatilité
+
+Volatilité Annuelle % =
+    CALCULATE (
+        MAX ( vw_dashboard_marche[volatilite_20j] ) * SQRT ( 252 ) * 100,
+        LASTDATE ( vw_dashboard_marche[date_cours] )
+    )
+
+RSI Actuel =
+    CALCULATE (
+        MAX ( vw_dashboard_marche[rsi_14] ),
+        LASTDATE ( vw_dashboard_marche[date_cours] )
+    )
+
+Signal RSI =
+    VAR R = [RSI Actuel]
+    RETURN
+        SWITCH (
+            TRUE (),
+            R >= 70, "Surachat",
+            R <= 30, "Survente",
+            "Neutre"
+        )
+
+Signal Tendance =
+    CALCULATE (
+        MAX ( vw_dashboard_marche[signal_tendance] ),
+        LASTDATE ( vw_dashboard_marche[date_cours] )
+    )
+
+Drawdown Max % =
+    VAR TickerSel = SELECTEDVALUE ( vw_dashboard_marche[ticker] )
+    VAR TablePrix =
+        FILTER (
+            ALL ( vw_dashboard_marche ),
+            vw_dashboard_marche[ticker] = TickerSel
+        )
+    VAR Peak =
+        MAXX (
+            TablePrix,
+            CALCULATE ( MAX ( vw_dashboard_marche[close] ), FILTER ( TablePrix, vw_dashboard_marche[date_cours] <= EARLIER ( vw_dashboard_marche[date_cours] ) ) )
+        )
+    RETURN
+        MINX (
+            ADDCOLUMNS ( TablePrix, "DD", ( vw_dashboard_marche[close] / Peak - 1 ) * 100 ),
+            [DD]
+        )
+
+Sharpe Ratio Simplifié =
+    VAR RendMoy = AVERAGE ( vw_dashboard_marche[rendement_jour] ) * 252
+    VAR VolAnn = AVERAGE ( vw_dashboard_marche[volatilite_20j] ) * SQRT ( 252 )
+    RETURN
+        IF ( VolAnn > 0, RendMoy / VolAnn, BLANK () )

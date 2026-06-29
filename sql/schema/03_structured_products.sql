@@ -9,7 +9,7 @@ CREATE TABLE IF NOT EXISTS dim_produit_structure (
     isin                TEXT,
     type_produit        TEXT NOT NULL CHECK (type_produit IN (
                             'autocall', 'reverse_convertible',
-                            'capital_protected', 'worst_of_autocall'
+                            'capital_protected', 'cln'
                         )),
     sous_jacent_1       TEXT NOT NULL,
     sous_jacent_2       TEXT,

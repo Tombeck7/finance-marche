@@ -1,0 +1,56 @@
+// Mesures DAX — Rendement et performance
+// À coller dans Power BI Desktop (Modélisation > Nouvelle mesure)
+
+Rendement Jour % =
+    AVERAGE ( vw_dashboard_marche[rendement_jour] ) * 100
+
+Rendement Cumulé YTD =
+    VAR TickerSel = SELECTEDVALUE ( vw_dashboard_marche[ticker] )
+    VAR DebutAnnee =
+        CALCULATE (
+            MIN ( vw_dashboard_marche[date_cours] ),
+            YEAR ( vw_dashboard_marche[date_cours] ) = YEAR ( TODAY () )
+        )
+    VAR PrixDebut =
+        CALCULATE (
+            MIN ( vw_dashboard_marche[close] ),
+            vw_dashboard_marche[date_cours] = DebutAnnee,
+            vw_dashboard_marche[ticker] = TickerSel
+        )
+    VAR PrixFin =
+        CALCULATE (
+            MAX ( vw_dashboard_marche[close] ),
+            vw_dashboard_marche[ticker] = TickerSel
+        )
+    RETURN
+        IF ( PrixDebut > 0, ( PrixFin / PrixDebut - 1 ) * 100, BLANK () )
+
+Prix Dernier =
+    CALCULATE (
+        MAX ( vw_dashboard_marche[close] ),
+        LASTDATE ( vw_dashboard_marche[date_cours] )
+    )
+
+Variation vs SMA50 =
+    VAR Close = [Prix Dernier]
+    VAR SMA50 =
+        CALCULATE (
+            MAX ( vw_dashboard_marche[sma_50] ),
+            LASTDATE ( vw_dashboard_marche[date_cours] )
+        )
+    RETURN
+        IF ( NOT ISBLANK ( SMA50 ), ( Close / SMA50 - 1 ) * 100, BLANK () )
+
+Nb Instruments =
+    DISTINCTCOUNT ( vw_dashboard_marche[ticker] )
+
+Volume Moyen 20J =
+    CALCULATE (
+        AVERAGE ( vw_dashboard_marche[volume] ),
+        DATESINPERIOD (
+            vw_dashboard_marche[date_cours],
+            MAX ( vw_dashboard_marche[date_cours] ),
+            -20,
+            DAY
+        )
+    )

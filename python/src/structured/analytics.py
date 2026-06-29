@@ -98,9 +98,14 @@ def _duree_ecoulee_pct(date_emission: str, date_echeance: str) -> float:
     return min(round(elapsed / total * 100, 1), 100.0)
 
 
-def _risk_score(statut: str, worst_of: float | None, vol_ann: float | None) -> int:
-    """Score de risque 0-100 pour un produit (plus haut = plus risqué)."""
-    base = {"KI_DECLENCHE": 90, "DANGER": 70, "VIGILANCE": 45, "OK": 15, "N/A": 0}.get(statut, 0)
+def _risk_score(statut: str, worst_of: float | None, vol_ann: float | None,
+                type_produit: str = "", coupon: float = 0.0) -> int:
+    """Score de risque 0-100 (plus haut = plus risqué)."""
+    if type_produit == "cln":
+        # Pour un CLN, le risque est le risque de crédit proxié par le coupon
+        # Coupon élevé = spread élevé = risque crédit élevé
+        return min(int(10 + coupon * 4), 85)
+    base      = {"KI_DECLENCHE": 90, "DANGER": 70, "VIGILANCE": 45, "OK": 15, "N/A": 0}.get(statut, 0)
     vol_bonus = min((vol_ann or 0) / 50 * 20, 20)
     wof_bonus = max(0, -((worst_of or 0) / 100) * 10)
     return min(int(base + vol_bonus + wof_bonus), 100)
@@ -142,12 +147,12 @@ def enrich_products_with_market(
         perfs = [v for v in [perf1, perf2, perf3] if v is not None]
         worst_of = min(perfs) if perfs else None
 
-        # Distance barrière KI (les produits capital_protected n'ont pas de knock-in)
+        # Distance barrière KI
         type_prod = str(p.get("type_produit", ""))
         ki = p["barriere_ki_pct"]
 
-        if type_prod == "capital_protected":
-            # Capital 100% protégé : pas de barrière KI, le risque est nul sur le capital
+        if type_prod in ("capital_protected", "cln"):
+            # Pas de barrière KI marchée — risque de crédit pour CLN
             dist_ki = None
             statut  = "OK"
         elif worst_of is not None:
@@ -175,7 +180,8 @@ def enrich_products_with_market(
         coupon_acc = _coupon_accumule(p["date_emission"], p["coupon_annuel_pct"], p["date_echeance"])
         duree_pct  = _duree_ecoulee_pct(p["date_emission"], p["date_echeance"])
         next_obs   = _next_obs_date(p["date_emission"], p.get("periodicite_obs", "trimestrielle"))
-        score      = _risk_score(statut, worst_of, vol_sj1)
+        score      = _risk_score(statut, worst_of, vol_sj1,
+                                 type_prod, float(p.get("coupon_annuel_pct") or 0))
 
         rows.append({
             **p.to_dict(),

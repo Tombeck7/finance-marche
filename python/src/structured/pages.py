@@ -32,7 +32,12 @@ CHART_C  = ["#58a6ff","#3fb950","#f78166","#d29922","#bc8cff","#39d353","#ff7b72
 
 STATUT_COLOR = {"OK": GREEN, "VIGILANCE": YELLOW, "DANGER": RED, "KI_DECLENCHE": "#c0392b", "N/A": MUTED}
 STATUT_LABEL = {"OK": "OK", "VIGILANCE": "Vigilance", "DANGER": "Danger !", "KI_DECLENCHE": "KI déclenché", "N/A": "—"}
-TYPE_LABEL   = {"autocall": "Autocall", "worst_of_autocall": "Worst-Of", "reverse_convertible": "Rev. Conv.", "capital_protected": "Cap. Protégé"}
+TYPE_LABEL   = {
+    "autocall":           "Autocall",
+    "reverse_convertible":"Rev. Conv.",
+    "capital_protected":  "Cap. Protégé",
+    "cln":                "CLN",
+}
 
 
 def _rgba(hex_color: str, alpha: float = 0.15) -> str:
@@ -236,8 +241,16 @@ def page_suivi_produits(engine, market_df: pd.DataFrame):
 
         jr   = _f(row.get("jours_restants"))
         jr_s = f"{int(jr)}j restants" if jr > 0 else _v(row.get("date_echeance",""))
-        ki_html = _progress_bar(dist, row["statut"]) if row["type_produit"] != "capital_protected" else \
-            f'<span style="color:{GREEN};font-size:12px;font-weight:600;">Capital 100% protégé à l\'échéance</span>'
+        if row["type_produit"] == "capital_protected":
+            ki_html = f'<span style="color:{GREEN};font-size:12px;font-weight:600;">Capital 100% protégé à l\'échéance</span>'
+        elif row["type_produit"] == "cln":
+            recov = _f(row.get("barriere_ki_pct")) * 100
+            ki_html = (
+                f'<span style="color:{YELLOW};font-size:12px;font-weight:600;">'
+                f'Risque de crédit — taux de recouvrement estimé : {recov:.0f}%</span>'
+            )
+        else:
+            ki_html = _progress_bar(dist, row["statut"])
         st.markdown(f"""
         <div style="background:{BG_CARD};border:1px solid {BORDER};border-left:3px solid {STATUT_COLOR.get(row['statut'],MUTED)};
                     border-radius:10px;padding:16px 20px;margin-bottom:10px;">
@@ -263,8 +276,10 @@ def page_suivi_produits(engine, market_df: pd.DataFrame):
               <div style="color:{wof_c};font-weight:700;">{wof:+.1f}%</div>
             </div>
             <div>
-              <div style="color:{MUTED};font-size:10px;margin-bottom:3px;">DIST. KI</div>
-              <div style="color:{STATUT_COLOR.get(row['statut'],MUTED)};font-weight:700;">{"N/A" if row["type_produit"]=="capital_protected" else f"{dist:.1f}%"}</div>
+              <div style="color:{MUTED};font-size:10px;margin-bottom:3px;">{"RECOUVREMENT" if row["type_produit"]=="cln" else "DIST. KI"}</div>
+              <div style="color:{STATUT_COLOR.get(row['statut'],MUTED)};font-weight:700;">
+                {"N/A" if row["type_produit"] in ("capital_protected","cln") else f"{dist:.1f}%"}
+              </div>
             </div>
             <div>
               <div style="color:{MUTED};font-size:10px;margin-bottom:3px;">COUPON /AN</div>
@@ -303,7 +318,7 @@ def page_simulateur(engine, market_df: pd.DataFrame):
             "Analyse probabiliste des scénarios, payoff et trajectoires")
 
     products  = load_products(engine)
-    autocalls = products[products["type_produit"].isin(["autocall", "worst_of_autocall"])]
+    autocalls = products[products["type_produit"].isin(["autocall", "reverse_convertible"])]
     if autocalls.empty:
         st.warning("Aucun autocall trouvé.")
         return
