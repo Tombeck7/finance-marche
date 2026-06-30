@@ -20,6 +20,7 @@ from src.structured.pages import (
     page_dashboard_manager, page_suivi_produits, page_simulateur,
     page_clients, page_screener, page_pitch_client, page_meeting_pack,
 )
+from src.ui.components import status_pill
 
 # ── Config ────────────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -313,62 +314,108 @@ def data_quality(df: pd.DataFrame, engine) -> dict[str, object]:
     from datetime import timedelta
     meta = _get_meta(engine)
     if df.empty:
-        return {**meta, "rows": 0, "last_date": "N/A", "tickers": 0, "stale": True}
+        return {**meta, "rows": 0, "last_date": "N/A", "tickers": 0, "stale": True, "last_refresh": meta.get("last_refresh", "N/A")}
     last_date = df["date_cours"].max().date()
-    stale = last_date < (pd.Timestamp.today().date() - timedelta(days=5))
+    stale = last_date < (pd.Timestamp.today().date() - timedelta(days=1))
     return {
         **meta,
         "rows": int(len(df)),
         "last_date": str(last_date),
         "tickers": int(df["ticker"].nunique()),
         "stale": bool(stale),
+        "last_refresh": meta.get("last_refresh", str(last_date)),
     }
 
 
 def data_quality_banner(info: dict[str, object]):
-    source = info.get("data_source", "Source inconnue")
-    color = GREEN if source == "Yahoo Finance" and not info.get("stale") else YELLOW
+    source = str(info.get("data_source", "Source inconnue"))
+    stale = bool(info.get("stale"))
+    if source == "Yahoo Finance" and not stale:
+        color, pill = GREEN, "LIVE"
+    elif source == "Données démo":
+        color, pill = YELLOW, "DEMO"
+    elif stale:
+        color, pill = RED, "STALE"
+    else:
+        color, pill = YELLOW, "LOCAL"
     msg = info.get("data_message", "")
+    pill_html = status_pill(pill, color)
     st.markdown(f"""
     <div style="background:{BG_CARD};border:1px solid {BORDER};border-left:3px solid {color};
                 border-radius:9px;padding:10px 14px;margin-bottom:16px;font-size:12px;">
-      <span style="color:{color};font-weight:700;">Données : {source}</span>
-      <span style="color:{MUTED};"> · Dernière date : {info.get('last_date','N/A')} · {info.get('tickers',0)} tickers · {info.get('rows',0)} lignes</span>
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;">
+        <span style="color:{color};font-weight:700;">Données : {source}</span>
+        {pill_html}
+      </div>
+      <span style="color:{MUTED};"> · Dernière séance : {info.get('last_date','N/A')} · Dernier refresh : {info.get('last_refresh','N/A')} · {info.get('tickers',0)} tickers</span>
       <div style="color:{MUTED};margin-top:3px;">{msg}</div>
     </div>
     """, unsafe_allow_html=True)
 
 
+def try_auto_refresh(df: pd.DataFrame, engine) -> None:
+    """Tente un refresh Yahoo au démarrage si les cours sont obsolètes (non bloquant)."""
+    if st.session_state.get("auto_refresh_tried"):
+        return
+    st.session_state["auto_refresh_tried"] = True
+    meta = _get_meta(engine)
+    if meta.get("data_source") == "Données démo" or df.empty:
+        return
+    last_date = pd.to_datetime(df["date_cours"].max()).date()
+    if last_date >= pd.Timestamp.today().date() - pd.Timedelta(days=1):
+        return
+    try:
+        from src.load_to_sql import load_prices
+        from src.ingest.fetch_yfinance import fetch_market_data, get_last_fetch_status
+        new_df = fetch_market_data()
+        if new_df.empty:
+            return
+        load_prices(engine, new_df)
+        status = get_last_fetch_status()
+        _set_meta(
+            engine,
+            data_source="Yahoo Finance",
+            data_message=status.get("message", "Auto-refresh Yahoo Finance OK"),
+            loaded_tickers=",".join(status.get("loaded_tickers", [])),
+            failed_tickers=",".join(status.get("failed_tickers", [])),
+            last_refresh=str(status.get("latest_date") or pd.Timestamp.today().date()),
+        )
+        st.cache_data.clear()
+    except Exception:
+        pass
+
+
 # ── Navigation ────────────────────────────────────────────────────────────────
 _NAV_ITEMS = [
-    ("page",   "🏠  Accueil"),
+    ("page",   "Accueil"),
     ("header", "── Marchés"),
-    ("page",   "📊  Vue Marché"),
-    ("page",   "⚠️  Risque & Indicateurs"),
-    ("page",   "🔗  Corrélations"),
-    ("page",   "🕯️  Bougies"),
+    ("page",   "Vue Marché"),
+    ("page",   "Risque & Indicateurs"),
+    ("page",   "Corrélations"),
+    ("page",   "Bougies"),
     ("header", "── Produits Structurés"),
-    ("page",   "📚  Book Produits"),
-    ("page",   "🚨  Alertes Sales"),
-    ("page",   "📊  Dashboard Manager"),
-    ("page",   "⚖️  Comparateur"),
-    ("page",   "🛡️  Suivi Produits"),
-    ("page",   "🎲  Simulateur Autocall"),
-    ("page",   "👤  Vue Clients"),
-    ("page",   "🧾  Pitch Client"),
-    ("page",   "📦  Meeting Pack"),
-    ("page",   "🔍  Screener"),
+    ("page",   "Book Produits"),
+    ("page",   "Alertes Sales"),
+    ("page",   "Dashboard Manager"),
+    ("page",   "Comparateur"),
+    ("page",   "Suivi Produits"),
+    ("page",   "Simulateur Autocall"),
+    ("page",   "Vue Clients"),
+    ("page",   "Pitch Client"),
+    ("page",   "Meeting Pack"),
+    ("page",   "Screener"),
 ]
 
-_PAGE_LABELS = [item[1] for item in _NAV_ITEMS]
-_PAGE_NAMES  = {lbl: lbl.split("  ", 1)[-1] for lbl in _PAGE_LABELS}
+_PAGE_LABELS = [item[1] for item in _NAV_ITEMS if item[0] == "page"]
+_ALL_LABELS  = [item[1] for item in _NAV_ITEMS]
+_PAGE_NAMES  = {lbl: lbl.split("  ", 1)[-1] for lbl in _ALL_LABELS}
 _NAME_REMAP  = {
     "Suivi Produits": "Suivi Produits Structurés",
     "Screener":       "Screener Sous-jacents",
 }
 
 # Valeurs par défaut session
-for _k, _v in [("nav_sel", "🏠  Accueil"), ("nav_prev", "🏠  Accueil")]:
+for _k, _v in [("nav_sel", "Accueil"), ("nav_prev", "Accueil"), ("demo_mode", False), ("demo_step", 0)]:
     if _k not in st.session_state:
         st.session_state[_k] = _v
 
@@ -386,11 +433,14 @@ def sidebar(df: pd.DataFrame):
     </div>""", unsafe_allow_html=True)
 
     source_color = GREEN if info.get("data_source") == "Yahoo Finance" and not info.get("stale") else YELLOW
+    if info.get("stale"):
+        source_color = RED
     sb.markdown(f"""
     <div style="margin:0 10px 12px;background:{BG_CARD};border:1px solid {BORDER};border-left:3px solid {source_color};
                 border-radius:8px;padding:9px 10px;font-size:11px;">
       <div style="color:{source_color};font-weight:700;">{info.get('data_source','Source inconnue')}</div>
-      <div style="color:{MUTED};margin-top:2px;">Dernière date : {info.get('last_date','N/A')}</div>
+      <div style="color:{MUTED};margin-top:2px;">Séance : {info.get('last_date','N/A')}</div>
+      <div style="color:{MUTED};">Refresh : {info.get('last_refresh','N/A')}</div>
       <div style="color:{MUTED};">{info.get('tickers',0)} tickers · {info.get('rows',0)} lignes</div>
     </div>
     """, unsafe_allow_html=True)
@@ -408,11 +458,11 @@ def sidebar(df: pd.DataFrame):
     sb.markdown(f'<hr style="border-color:{BORDER};margin:12px 0;"/>', unsafe_allow_html=True)
 
     # ── Navigation unique ──
-    chosen = sb.radio("navigation", _PAGE_LABELS, label_visibility="collapsed",
-                      index=_PAGE_LABELS.index(st.session_state["nav_sel"]))
+    nav_index = _ALL_LABELS.index(st.session_state["nav_sel"]) if st.session_state["nav_sel"] in _ALL_LABELS else 0
+    chosen = sb.radio("navigation", _ALL_LABELS, label_visibility="collapsed", index=nav_index)
 
     # Si l'utilisateur clique sur un header → on garde la page précédente
-    if _NAV_ITEMS[_PAGE_LABELS.index(chosen)][0] == "header":
+    if _NAV_ITEMS[_ALL_LABELS.index(chosen)][0] == "header":
         chosen = st.session_state["nav_prev"]
     else:
         st.session_state["nav_prev"] = chosen
@@ -422,7 +472,7 @@ def sidebar(df: pd.DataFrame):
     page = _NAME_REMAP.get(raw, raw)
 
     sb.markdown(f'<hr style="border-color:{BORDER};margin:12px 0 8px;"/>', unsafe_allow_html=True)
-    if sb.button("🔄  Rafraîchir les données"):
+    if sb.button("Rafraîchir les données"):
         from src.load_to_sql import load_prices
         with st.spinner("Téléchargement Yahoo Finance…"):
             try:
@@ -433,6 +483,9 @@ def sidebar(df: pd.DataFrame):
                 engine = get_db()
                 load_prices(engine, df)
                 status = get_last_fetch_status()
+                failed = status.get("failed_tickers", [])
+                if failed:
+                    st.sidebar.warning(f"Tickers en échec : {', '.join(failed)}")
                 _set_meta(
                     engine,
                     data_source="Yahoo Finance",
@@ -474,11 +527,50 @@ def page_accueil(df: pd.DataFrame, engine):
     info = data_quality(df, engine)
     data_quality_banner(info)
 
+    from src.structured.analytics import build_sales_alerts, enrich_products_with_market, load_positions, load_products
+    positions = load_positions(engine)
+    products = load_products(engine)
+    enriched = enrich_products_with_market(products, df) if not products.empty else products
+    alerts = build_sales_alerts(positions, enriched, df) if not enriched.empty else pd.DataFrame()
+
     c1, c2, c3, c4 = st.columns(4)
-    with c1: kpi("Source data", str(info.get("data_source", "N/A")), color=GREEN if info.get("data_source") == "Yahoo Finance" else YELLOW)
-    with c2: kpi("Dernière date", str(info.get("last_date", "N/A")))
-    with c3: kpi("Tickers", str(info.get("tickers", 0)), color=ACCENT)
-    with c4: kpi("Lignes SQL", f"{int(info.get('rows', 0)):,}".replace(",", " "), color=TEXT)
+    with c1: kpi("Source data", str(info.get("data_source", "N/A")), color=GREEN if info.get("data_source") == "Yahoo Finance" and not info.get("stale") else YELLOW)
+    with c2: kpi("Dernière séance", str(info.get("last_date", "N/A")))
+    with c3: kpi("Alertes sales", str(len(alerts)), color=RED if len(alerts) else GREEN)
+    with c4: kpi("Tickers", str(info.get("tickers", 0)), color=ACCENT)
+
+    section("PARCOURS DÉMO ENTRETIEN (5 MIN)")
+    st.markdown(f"""
+    <div style="background:{BG_CARD};border:1px solid {BORDER};border-radius:10px;padding:14px 18px;margin-bottom:12px;color:{TEXT};font-size:13px;line-height:1.6;">
+      Parcours guidé : Meeting Pack → Comparateur → Book Produits → Dashboard Manager → Export HTML.
+    </div>
+    """, unsafe_allow_html=True)
+    bc1, bc2, bc3, bc4, bc5 = st.columns(5)
+    demo_pages = ["Meeting Pack", "Comparateur", "Book Produits", "Dashboard Manager", "Meeting Pack"]
+    for col, (label, step) in zip([bc1, bc2, bc3, bc4, bc5], enumerate(demo_pages)):
+        with col:
+            if st.button(label, key=f"demo_nav_{step}", use_container_width=True):
+                st.session_state["demo_mode"] = True
+                st.session_state["demo_step"] = step
+                st.session_state["nav_sel"] = label
+                st.rerun()
+    if st.button("Démarrer la démo entretien", type="primary"):
+        st.session_state["demo_mode"] = True
+        st.session_state["demo_step"] = 0
+        st.session_state["nav_sel"] = "Meeting Pack"
+        st.rerun()
+
+    if not alerts.empty:
+        section("ALERTES PRIORITAIRES")
+        for _, row in alerts.head(3).iterrows():
+            color = RED if row["priorite"] == "Haute" else YELLOW
+            st.markdown(f"""
+            <div style="background:{BG_CARD};border:1px solid {BORDER};border-left:3px solid {color};border-radius:8px;padding:10px 14px;margin-bottom:8px;font-size:12px;">
+              <span style="color:{color};font-weight:700;">{row['priorite']}</span>
+              <span style="color:{TEXT};font-weight:600;"> · {row['client']} — {row['produit']}</span>
+              <div style="color:{MUTED};margin-top:3px;">{row['raison'][:120]}</div>
+            </div>
+            """, unsafe_allow_html=True)
 
     section("CE QUE DÉMONTRE LE PROJET")
     st.markdown(f"""
@@ -546,12 +638,11 @@ def page_accueil(df: pd.DataFrame, engine):
     section("PARCOURS DÉMO ENTRETIEN")
     st.markdown(f"""
     <div style="background:{BG_CARD};border:1px solid {BORDER};border-radius:10px;padding:16px 18px;color:{TEXT};font-size:13px;line-height:1.7;">
-      <b style="color:{ACCENT};">1. Vue Marché</b> : montrer les données et indicateurs.<br>
-      <b style="color:{ACCENT};">2. Dashboard Manager</b> : identifier les priorités commerciales.<br>
-      <b style="color:{ACCENT};">3. Alertes Sales</b> : expliquer qui appeler et pourquoi.<br>
-      <b style="color:{ACCENT};">4. Book Produits</b> : choisir une idée, expliquer payoff, risque et stress tests.<br>
-      <b style="color:{ACCENT};">5. Meeting Pack</b> : montrer la fiche rendez-vous complète et exporter la synthèse.<br>
-      <span style="color:{MUTED};">Phrase entretien : “J’ai voulu construire un outil qui relie la donnée marché, la base SQL et le besoin concret d’un assistant sales : prioriser, expliquer et préparer un échange client.”</span>
+      <b style="color:{ACCENT};">1. Meeting Pack</b> : fiche rendez-vous complète + export HTML.<br>
+      <b style="color:{ACCENT};">2. Comparateur</b> : radar et payoff pour argumenter.<br>
+      <b style="color:{ACCENT};">3. Book Produits</b> : stress tests et barrières vs sous-jacent.<br>
+      <b style="color:{ACCENT};">4. Dashboard Manager</b> : encours, alertes, observations à venir.<br>
+      <span style="color:{MUTED};">Phrase entretien : « J'ai voulu relier la donnée marché, la base SQL et le besoin concret d'un assistant sales : prioriser, expliquer et préparer un échange client. »</span>
     </div>
     """, unsafe_allow_html=True)
 
@@ -912,6 +1003,10 @@ def main():
     except Exception:
         df_raw = pd.DataFrame()
     df_raw = ensure_data(df_raw)
+    engine = get_db()
+    try_auto_refresh(df_raw, engine)
+    if st.session_state.get("auto_refresh_tried") and not df_raw.empty:
+        df_raw = load_data()
 
     ticker_sel, date_range, page = sidebar(df_raw)
 
@@ -920,7 +1015,6 @@ def main():
         return
 
     df      = filter_df(df_raw, ticker_sel, date_range)
-    engine  = get_db()
     if page != "Accueil":
         data_quality_banner(data_quality(df_raw, engine))
 

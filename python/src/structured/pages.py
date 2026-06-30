@@ -10,6 +10,8 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from .analytics import (
+    barrier_monitor_series,
+    build_meeting_pack_html,
     build_sales_alerts,
     compare_products,
     enrich_products_with_market,
@@ -19,7 +21,9 @@ from .analytics import (
     simulate_autocall,
     stress_test_product,
     suitability_score,
+    upcoming_observations,
 )
+from src.ui.components import demo_banner, pitch_block
 
 # ── Palette ───────────────────────────────────────────────────────────────────
 BG       = "#0d1117"
@@ -214,6 +218,72 @@ def _comparator_radar_fig(comp: pd.DataFrame) -> go.Figure:
         legend=dict(bgcolor="rgba(0,0,0,0)", font=dict(color=MUTED, size=10), orientation="h", y=-0.12),
         margin=dict(l=20, r=20, t=20, b=20),
         font=dict(color=MUTED),
+    )
+    return fig
+
+
+_DEMO_STEPS = [
+    ("Meeting Pack", "Préparer le rendez-vous : synthèse client, alertes et idée produit."),
+    ("Comparateur", "Comparer 2 à 3 idées pour argumenter le choix en rendez-vous."),
+    ("Book Produits", "Approfondir payoff, risque et stress tests sur l'idée retenue."),
+    ("Dashboard Manager", "Montrer la vue manager : encours, alertes et priorités."),
+    ("Meeting Pack", "Exporter le pack HTML et conclure la démo."),
+]
+
+
+def _maybe_demo(page_key: str) -> None:
+    if not st.session_state.get("demo_mode"):
+        return
+    targets = [s[0] for s in _DEMO_STEPS]
+    step = int(st.session_state.get("demo_step", 0))
+    if page_key == targets[min(step, len(targets) - 1)]:
+        demo_banner(step, len(_DEMO_STEPS), _DEMO_STEPS[step][1])
+        if step < len(_DEMO_STEPS) - 1:
+            if st.button("Étape suivante →", key=f"demo_next_{page_key}"):
+                st.session_state["demo_step"] = step + 1
+                st.session_state["nav_sel"] = _DEMO_STEPS[step + 1][0]
+                st.rerun()
+
+
+def _barrier_monitor_fig(row, market_df: pd.DataFrame, height: int = 300) -> go.Figure | None:
+    series = barrier_monitor_series(row, market_df)
+    if series.empty:
+        return None
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=series["date_cours"], y=series["level_pct"],
+        name="Sous-jacent (% strike)", mode="lines",
+        line=dict(color=ACCENT, width=2),
+    ))
+    fig.add_hline(y=series["ki_pct"].iloc[0], line_dash="dash", line_color=RED,
+                  annotation_text="KI", annotation_font_color=RED, annotation_font_size=10)
+    fig.add_hline(y=series["rappel_pct"].iloc[0], line_dash="dash", line_color=GREEN,
+                  annotation_text="Rappel", annotation_font_color=GREEN, annotation_font_size=10)
+    fig.add_hline(y=100, line_color=MUTED, line_width=1,
+                  annotation_text="Strike", annotation_font_color=MUTED, annotation_font_size=10)
+    _chart(fig, height=height)
+    fig.update_layout(
+        showlegend=False,
+        yaxis_title="Niveau (% du strike)",
+        xaxis_title="",
+    )
+    return fig
+
+
+def _sparkline_fig(market_df: pd.DataFrame, ticker: str, color: str = ACCENT) -> go.Figure | None:
+    grp = market_df[market_df["ticker"] == ticker].sort_values("date_cours").tail(30)
+    if grp.empty:
+        return None
+    fig = go.Figure(go.Scatter(
+        x=grp["date_cours"], y=grp["close"],
+        mode="lines", line=dict(color=color, width=1.5),
+        fill="tozeroy", fillcolor=_rgba(color, 0.12),
+    ))
+    fig.update_layout(
+        height=60, margin=dict(l=0, r=0, t=0, b=0),
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+        xaxis=dict(visible=False), yaxis=dict(visible=False),
+        showlegend=False,
     )
     return fig
 
@@ -470,6 +540,10 @@ def page_suivi_produits(engine, market_df: pd.DataFrame):
           </div>
         </div>
         """, unsafe_allow_html=True)
+        if str(row.get("type_produit", "")) not in ("capital_protected", "cln"):
+            bfig = _barrier_monitor_fig(row, market_df, height=240)
+            if bfig:
+                st.plotly_chart(bfig, use_container_width=True, config={"displayModeBar": False})
 
 
 # ── PAGE : Simulateur Autocall ────────────────────────────────────────────────
@@ -805,6 +879,7 @@ def page_clients(engine, market_df: pd.DataFrame):
 
 
 def page_pitch_client(engine, market_df: pd.DataFrame):
+    _maybe_demo("Pitch Client")
     _header("Pitch Client", "Préparer une recommandation commerciale adaptée au profil client")
 
     positions = load_positions(engine)
@@ -888,11 +963,9 @@ def page_pitch_client(engine, market_df: pd.DataFrame):
               </div>
               <div style="color:{TEXT};font-size:11px;line-height:1.45;margin-top:8px;">{payoff}</div>
               <div style="color:{ACCENT};font-size:11px;line-height:1.45;margin-top:5px;">Action : {action}</div>
-              <div style="background:{BG_CARD2};border:1px solid {BORDER};border-radius:6px;padding:8px 10px;margin-top:8px;color:{TEXT};font-size:11px;line-height:1.45;">
-                <span style="color:{GREEN};font-weight:700;">Pitch 30 sec :</span> {pitch}
-              </div>
             </div>
             """, unsafe_allow_html=True)
+            pitch_block(pitch)
 
     with col_b:
         _sec("À ÉVITER / SURVEILLER")
@@ -916,6 +989,7 @@ def page_pitch_client(engine, market_df: pd.DataFrame):
 
 
 def page_meeting_pack(engine, market_df: pd.DataFrame):
+    _maybe_demo("Meeting Pack")
     _header("Meeting Pack", "Préparer un rendez-vous client avec visuels, alertes, idée produit et pitch")
 
     positions = load_positions(engine)
@@ -1080,7 +1154,26 @@ def page_meeting_pack(engine, market_df: pd.DataFrame):
             {"Bloc": "Pitch", "Synthèse": pitch},
         ])
         st.dataframe(pack_rows, use_container_width=True, hide_index=True)
-        _download_csv("Exporter le meeting pack", pack_rows, f"meeting_pack_{client_sel.replace(' ', '_')}.csv")
+        c_csv, c_html = st.columns(2)
+        with c_csv:
+            _download_csv("Export CSV", pack_rows, f"meeting_pack_{client_sel.replace(' ', '_')}.csv")
+        with c_html:
+            html_doc = build_meeting_pack_html(
+                client_sel, str(profil), str(segment), encours, max_risk,
+                client_alerts, selected_product, pitch,
+            )
+            st.download_button(
+                "Export HTML (imprimable)",
+                data=html_doc.encode("utf-8"),
+                file_name=f"meeting_pack_{client_sel.replace(' ', '_')}.html",
+                mime="text/html",
+                use_container_width=True,
+            )
+        if st.session_state.get("demo_mode") and int(st.session_state.get("demo_step", 0)) >= len(_DEMO_STEPS) - 1:
+            if st.button("Terminer la démo entretien", use_container_width=True):
+                st.session_state["demo_mode"] = False
+                st.session_state["demo_step"] = 0
+                st.success("Démo terminée — bon entretien !")
 
 
 # ── PAGE : Screener ───────────────────────────────────────────────────────────
@@ -1235,6 +1328,7 @@ def _product_card(row, extra_html: str = ""):
 
 
 def page_book_produits(engine, market_df: pd.DataFrame):
+    _maybe_demo("Book Produits")
     _header("Book Produits", "Bibliothèque commerciale avec recherche, filtres, pitch et stress tests")
     enriched = enrich_products_with_market(load_products(engine), market_df)
     if enriched.empty:
@@ -1264,6 +1358,10 @@ def page_book_produits(engine, market_df: pd.DataFrame):
         _product_card(row, extra)
         with st.expander(f"Stress tests — {row['nom']}"):
             st.dataframe(stress, use_container_width=True, hide_index=True)
+            if str(row.get("type_produit", "")) not in ("capital_protected", "cln"):
+                bfig = _barrier_monitor_fig(row, market_df)
+                if bfig:
+                    st.plotly_chart(bfig, use_container_width=True, config={"displayModeBar": False})
 
 
 def page_alertes_sales(engine, market_df: pd.DataFrame):
@@ -1296,6 +1394,7 @@ def page_alertes_sales(engine, market_df: pd.DataFrame):
 
 
 def page_comparateur(engine, market_df: pd.DataFrame):
+    _maybe_demo("Comparateur")
     _header("Comparateur", "Comparer 2 à 3 idées produits pour préparer un rendez-vous")
     enriched = enrich_products_with_market(load_products(engine), market_df)
     names = enriched["nom"].tolist()
@@ -1337,6 +1436,7 @@ def page_comparateur(engine, market_df: pd.DataFrame):
 
 
 def page_dashboard_manager(engine, market_df: pd.DataFrame):
+    _maybe_demo("Dashboard Manager")
     _header("Dashboard Manager", "Synthèse encours, risques et priorités commerciales")
     positions = load_positions(engine)
     enriched = enrich_products_with_market(load_products(engine), market_df)
@@ -1369,6 +1469,24 @@ def page_dashboard_manager(engine, market_df: pd.DataFrame):
         top = alerts.groupby("client").size().reset_index(name="alertes").sort_values("alertes", ascending=False).head(5) if not alerts.empty else pd.DataFrame(columns=["client", "alertes"])
         st.dataframe(top, use_container_width=True, hide_index=True)
 
+    obs = upcoming_observations(enriched, days_ahead=30)
+    if not obs.empty:
+        _sec("PROCHAINES OBSERVATIONS — 30 JOURS")
+        st.dataframe(
+            obs[["nom", "sous_jacent_1", "date_obs", "jours", "score_risque"]],
+            use_container_width=True, hide_index=True,
+        )
+
     _sec("TOP PRODUITS À SURVEILLER")
-    watch = enriched.sort_values("score_risque", ascending=False).head(5)[["nom", "type_produit", "score_risque", "statut", "point_attention"]]
-    st.dataframe(watch, use_container_width=True, hide_index=True)
+    watch = enriched.sort_values("score_risque", ascending=False).head(5)
+    for _, row in watch.iterrows():
+        c_info, c_spark = st.columns([3, 1])
+        with c_info:
+            st.markdown(
+                f"**{row['nom']}** · risque {int(_f(row.get('score_risque')))}/100 · "
+                f"{_v(row.get('point_attention'), '')[:80]}",
+            )
+        with c_spark:
+            sfig = _sparkline_fig(market_df, row["sous_jacent_1"], _risk_color(int(_f(row.get("score_risque")))))
+            if sfig:
+                st.plotly_chart(sfig, use_container_width=True, config={"displayModeBar": False})

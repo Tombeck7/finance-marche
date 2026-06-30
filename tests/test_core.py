@@ -12,6 +12,8 @@ from src.db import init_database
 from src.ingest.generate_demo_data import generate_demo_data
 from src.load_to_sql import load_prices
 from src.structured.analytics import (
+    barrier_monitor_series,
+    build_meeting_pack_html,
     build_sales_alerts,
     compare_products,
     enrich_products_with_market,
@@ -20,6 +22,7 @@ from src.structured.analytics import (
     load_products,
     stress_test_product,
     suitability_score,
+    upcoming_observations,
 )
 
 
@@ -98,9 +101,35 @@ def test_compare_products_returns_sales_columns():
     }.issubset(comparison.columns)
 
 
+def test_barrier_monitor_and_meeting_pack_html():
+    engine = init_database()
+    load_prices(engine, generate_demo_data(days=120))
+    with engine.connect() as conn:
+        market = pd.read_sql("SELECT * FROM vw_dashboard_marche", conn)
+    market["date_cours"] = pd.to_datetime(market["date_cours"])
+
+    enriched = enrich_products_with_market(load_products(engine), market)
+    autocall = enriched[enriched["type_produit"] == "autocall"].iloc[0]
+    series = barrier_monitor_series(autocall, market)
+    assert not series.empty
+    assert {"date_cours", "level_pct", "ki_pct", "rappel_pct"}.issubset(series.columns)
+
+    obs = upcoming_observations(enriched, days_ahead=365)
+    assert "nom" in obs.columns or obs.empty
+
+    html_doc = build_meeting_pack_html(
+        "Client Test", "equilibre", "prive", 500_000, 45,
+        pd.DataFrame(), autocall, "Pitch test pour le client.",
+    )
+    assert "Client Test" in html_doc
+    assert "Pitch test" in html_doc
+    assert html_doc.count("<html") == 1
+
+
 if __name__ == "__main__":
     test_products_are_enriched_with_cln_fields()
     test_suitability_respects_client_profiles()
     test_pitch_stress_and_alerts_are_generated()
     test_compare_products_returns_sales_columns()
+    test_barrier_monitor_and_meeting_pack_html()
     print("Tests OK")

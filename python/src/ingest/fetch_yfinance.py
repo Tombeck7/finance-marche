@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from datetime import date, timedelta
 
 import pandas as pd
@@ -22,6 +23,35 @@ def get_last_fetch_status() -> dict[str, object]:
     return LAST_FETCH_STATUS.copy()
 
 
+def _download_yahoo(
+    tickers: list[str],
+    start_date: date,
+    end_date: date,
+    max_retries: int = 3,
+) -> pd.DataFrame:
+    last_error = ""
+    for attempt in range(max_retries):
+        try:
+            raw = yf.download(
+                tickers,
+                start=start_date.strftime("%Y-%m-%d"),
+                end=end_date.strftime("%Y-%m-%d"),
+                auto_adjust=True,
+                progress=False,
+                threads=True,
+                timeout=15,
+            )
+            if not raw.empty:
+                return raw
+            last_error = "DataFrame vide"
+        except Exception as exc:
+            last_error = str(exc)
+        if attempt < max_retries - 1:
+            time.sleep(1.5 * (attempt + 1))
+    LAST_FETCH_STATUS["message"] = f"Échec après {max_retries} tentatives : {last_error}"
+    return pd.DataFrame()
+
+
 def fetch_market_data(
     tickers: list[str] | None = None,
     period: str = "2y",
@@ -40,22 +70,14 @@ def fetch_market_data(
     end_date   = today + timedelta(days=1)
     start_date = today - timedelta(days=365 * 2 + 30)  # ~2 ans + marge
 
-    raw = yf.download(
-        tickers,
-        start=start_date.strftime("%Y-%m-%d"),
-        end=end_date.strftime("%Y-%m-%d"),
-        auto_adjust=True,
-        progress=False,
-        threads=True,
-        timeout=8,
-    )
+    raw = _download_yahoo(tickers, start_date, end_date)
 
     if raw.empty:
         LAST_FETCH_STATUS.update({
             "loaded_tickers": [],
             "failed_tickers": tickers,
             "rows": 0,
-            "message": "Yahoo Finance a retourné un DataFrame vide.",
+            "message": LAST_FETCH_STATUS.get("message") or "Yahoo Finance a retourné un DataFrame vide.",
         })
         return pd.DataFrame()
 
@@ -118,12 +140,15 @@ def fetch_market_data(
 
     result = pd.concat(frames, ignore_index=True)
     latest_date = str(pd.to_datetime(result["date_cours"]).max().date())
+    msg = f"{len(loaded)}/{len(tickers)} tickers chargés depuis Yahoo Finance · dernière date {latest_date}."
+    if failed:
+        msg += f" Échecs : {', '.join(failed)}."
     LAST_FETCH_STATUS.update({
         "loaded_tickers": loaded,
         "failed_tickers": failed,
         "rows": int(len(result)),
         "latest_date": latest_date,
-        "message": f"{len(loaded)}/{len(tickers)} tickers chargés depuis Yahoo Finance · dernière date {latest_date}.",
+        "message": msg,
     })
 
     # Sauvegarde CSV optionnelle (ignorée sur Streamlit Cloud)

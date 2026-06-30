@@ -390,6 +390,133 @@ def build_sales_alerts(
     )
 
 
+def barrier_monitor_series(
+    product: dict | pd.Series,
+    market: pd.DataFrame,
+    lookback_days: int = 180,
+) -> pd.DataFrame:
+    """Série prix sous-jacent vs strike et barrières (niveau % du strike = 100)."""
+    p = product.to_dict() if hasattr(product, "to_dict") else dict(product)
+    ticker = p.get("sous_jacent_1")
+    strike = float(p.get("strike_1") or 1)
+    if not ticker or strike <= 0 or market.empty:
+        return pd.DataFrame()
+
+    grp = market[market["ticker"] == ticker].sort_values("date_cours").copy()
+    if grp.empty:
+        return pd.DataFrame()
+
+    cutoff = pd.Timestamp.today() - pd.Timedelta(days=lookback_days)
+    grp = grp[grp["date_cours"] >= cutoff]
+    if grp.empty:
+        return pd.DataFrame()
+
+    ki_pct = float(p.get("barriere_ki_pct") or 0.7)
+    rappel_pct = float(p.get("barriere_rappel_pct") or 1.0)
+    grp["level_pct"] = grp["close"] / strike * 100
+    grp["ki_pct"] = ki_pct * 100
+    grp["rappel_pct"] = rappel_pct * 100
+    grp["strike_pct"] = 100.0
+    return grp[["date_cours", "level_pct", "ki_pct", "rappel_pct", "strike_pct", "close"]].reset_index(drop=True)
+
+
+def upcoming_observations(
+    enriched: pd.DataFrame,
+    days_ahead: int = 30,
+) -> pd.DataFrame:
+    """Produits avec une observation dans les N prochains jours."""
+    if enriched.empty:
+        return pd.DataFrame(columns=["nom", "type_produit", "sous_jacent_1", "date_obs", "jours"])
+    today = date.today()
+    rows: list[dict] = []
+    for _, p in enriched.iterrows():
+        if str(p.get("type_produit", "")) in ("capital_protected", "cln"):
+            continue
+        d_em = _parse_date(p.get("date_emission"))
+        if d_em is None:
+            continue
+        step_days = {"trimestrielle": 91, "semestrielle": 182, "annuelle": 365}.get(
+            str(p.get("periodicite_obs", "trimestrielle")).lower(), 91
+        )
+        d = d_em
+        while d <= today:
+            d += timedelta(days=step_days)
+        jours = (d - today).days
+        if 0 <= jours <= days_ahead:
+            rows.append({
+                "nom": p.get("nom"),
+                "type_produit": p.get("type_produit"),
+                "sous_jacent_1": p.get("sous_jacent_1"),
+                "date_obs": d.strftime("%Y-%m-%d"),
+                "jours": jours,
+                "score_risque": int(float(p.get("score_risque") or 0)),
+                "dist_barriere_ki_pct": p.get("dist_barriere_ki_pct"),
+            })
+    if not rows:
+        return pd.DataFrame(columns=["nom", "type_produit", "sous_jacent_1", "date_obs", "jours"])
+    return pd.DataFrame(rows).sort_values("jours")
+
+
+def build_meeting_pack_html(
+    client: str,
+    profil: str,
+    segment: str,
+    encours: float,
+    max_risk: int,
+    client_alerts: pd.DataFrame,
+    product: dict | pd.Series,
+    pitch: str,
+) -> str:
+    """Génère un HTML autonome imprimable pour le meeting pack."""
+    p = product.to_dict() if hasattr(product, "to_dict") else dict(product)
+    alert_rows = ""
+    if client_alerts.empty:
+        alert_rows = "<li>Aucune alerte majeure</li>"
+    else:
+        for _, a in client_alerts.head(6).iterrows():
+            alert_rows += (
+                f"<li><strong>{a['priorite']}</strong> — {a['produit']}: "
+                f"{a['raison']}</li>"
+            )
+    return f"""<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8"/>
+<title>Meeting Pack — {client}</title>
+<style>
+body{{font-family:Inter,Segoe UI,sans-serif;background:#fff;color:#1f2937;margin:32px;line-height:1.5;}}
+h1{{font-size:24px;margin:0 0 4px;}}
+.meta{{color:#6b7280;font-size:13px;margin-bottom:24px;}}
+.card{{border:1px solid #e5e7eb;border-radius:10px;padding:16px 18px;margin-bottom:16px;}}
+.kpi{{display:inline-block;margin-right:24px;}}
+.kpi b{{display:block;font-size:20px;color:#111827;}}
+label{{font-size:10px;text-transform:uppercase;color:#6b7280;letter-spacing:.06em;}}
+ul{{margin:8px 0;padding-left:20px;}}
+.pitch{{background:#f0fdf4;border-left:4px solid #3fb950;padding:12px 14px;border-radius:6px;}}
+@media print{{body{{margin:16px;}}}}
+</style>
+</head>
+<body>
+<h1>Meeting Pack — {client}</h1>
+<div class="meta">Profil {profil} · Segment {segment} · Encours {encours/1000:.0f}k EUR · Risque max {max_risk}/100</div>
+<div class="card">
+  <label>Alertes à traiter</label>
+  <ul>{alert_rows}</ul>
+</div>
+<div class="card">
+  <label>Idée produit</label>
+  <h2 style="margin:8px 0 4px;font-size:18px;">{p.get('nom', '')}</h2>
+  <div class="kpi"><label>Coupon</label><b>{float(p.get('coupon_annuel_pct') or 0):.1f}%</b></div>
+  <div class="kpi"><label>Risque</label><b>{int(float(p.get('score_risque') or 0))}/100</b></div>
+  <div class="kpi"><label>Adéquation</label><b>{p.get('adequation', '—')}</b></div>
+  <p style="margin-top:12px;">{p.get('payoff_summary', '')}</p>
+</div>
+<div class="pitch"><strong>Pitch 30 sec</strong><br/>{pitch}</div>
+<p style="color:#9ca3af;font-size:11px;margin-top:32px;">Généré par Finance Marché — document indicatif, non contractuel.</p>
+</body>
+</html>"""
+
+
 def compare_products(enriched: pd.DataFrame, product_names: list[str] | None = None) -> pd.DataFrame:
     """Prépare une table de comparaison commerciale de 2 à 3 produits."""
     if enriched.empty:
