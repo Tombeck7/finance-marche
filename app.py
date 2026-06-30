@@ -439,7 +439,7 @@ def sidebar(df: pd.DataFrame):
                     data_message=status.get("message", "Yahoo Finance OK"),
                     loaded_tickers=",".join(status.get("loaded_tickers", [])),
                     failed_tickers=",".join(status.get("failed_tickers", [])),
-                    last_refresh=str(pd.Timestamp.today().date()),
+                    last_refresh=str(status.get("latest_date") or pd.Timestamp.today().date()),
                 )
             except Exception as exc:
                 from src.ingest.generate_demo_data import generate_demo_data

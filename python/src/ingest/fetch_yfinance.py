@@ -34,9 +34,11 @@ def fetch_market_data(
     """
     tickers = tickers or DEFAULT_TICKERS
 
-    # Dates explicites pour garantir les données les plus récentes
-    end_date   = date.today()
-    start_date = end_date - timedelta(days=365 * 2 + 30)  # ~2 ans + marge
+    # yfinance traite `end` comme une borne exclusive. On demande donc demain
+    # pour inclure la séance du jour quand Yahoo publie une bougie daily partielle.
+    today      = date.today()
+    end_date   = today + timedelta(days=1)
+    start_date = today - timedelta(days=365 * 2 + 30)  # ~2 ans + marge
 
     raw = yf.download(
         tickers,
@@ -115,11 +117,13 @@ def fetch_market_data(
         return pd.DataFrame()
 
     result = pd.concat(frames, ignore_index=True)
+    latest_date = str(pd.to_datetime(result["date_cours"]).max().date())
     LAST_FETCH_STATUS.update({
         "loaded_tickers": loaded,
         "failed_tickers": failed,
         "rows": int(len(result)),
-        "message": f"{len(loaded)}/{len(tickers)} tickers chargés depuis Yahoo Finance.",
+        "latest_date": latest_date,
+        "message": f"{len(loaded)}/{len(tickers)} tickers chargés depuis Yahoo Finance · dernière date {latest_date}.",
     })
 
     # Sauvegarde CSV optionnelle (ignorée sur Streamlit Cloud)
