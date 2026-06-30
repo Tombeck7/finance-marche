@@ -10,10 +10,15 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from .analytics import (
+    build_sales_alerts,
+    compare_products,
     enrich_products_with_market,
+    generate_sales_pitch,
     load_positions,
     load_products,
     simulate_autocall,
+    stress_test_product,
+    suitability_score,
 )
 
 # ── Palette ───────────────────────────────────────────────────────────────────
@@ -64,6 +69,7 @@ def _f(val, default=0.0) -> float:
     try: return float(val)
     except (TypeError, ValueError): return default
 
+
 def _chart(fig, height=380, **kw):
     fig.update_layout(
         height=height, paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor=BG,
@@ -110,16 +116,133 @@ def _progress_bar(pct: float, statut: str) -> str:
       <span style="font-size:10px;color:{color};font-weight:600;">{capped:.1f}% restant</span>
     </div>"""
 
-def _score_bar(score: int) -> str:
-    color = GREEN if score < 30 else (YELLOW if score < 60 else RED)
-    return f"""
-    <div style="width:100%;background:#1c2230;border-radius:4px;height:5px;overflow:hidden;">
-      <div style="width:{score}%;background:{color};height:100%;border-radius:4px;"></div>
-    </div>"""
-
 def _header(title: str, sub: str):
     st.markdown(f'<div style="font-size:22px;font-weight:700;color:{TEXT};margin-bottom:3px;">{title}</div>', unsafe_allow_html=True)
     st.markdown(f'<div style="font-size:13px;color:{MUTED};margin-bottom:20px;">{sub}</div>', unsafe_allow_html=True)
+
+
+def _download_csv(label: str, df: pd.DataFrame, filename: str):
+    st.download_button(
+        label,
+        data=df.to_csv(index=False).encode("utf-8-sig"),
+        file_name=filename,
+        mime="text/csv",
+        use_container_width=True,
+    )
+
+
+def _risk_color(score: int) -> str:
+    return GREEN if score < 30 else (YELLOW if score < 60 else RED)
+
+
+def _payoff_profile_fig(row, height: int = 260) -> go.Figure:
+    """Profil de payoff indicatif, volontairement simple pour support sales."""
+    ptype = str(row.get("type_produit", ""))
+    coupon = _f(row.get("coupon_annuel_pct"))
+    ki = _f(row.get("barriere_ki_pct"), 0.7) * 100
+    rappel = _f(row.get("barriere_rappel_pct"), 1.0) * 100
+    levels = np.linspace(50, 130, 81)
+
+    if ptype == "capital_protected":
+        payoff = np.maximum(0, (levels - 100) * 0.45)
+        title = "Profil indicatif : capital protégé"
+    elif ptype == "cln":
+        payoff = np.full_like(levels, coupon)
+        title = "Profil indicatif : CLN hors événement crédit"
+    elif ptype == "reverse_convertible":
+        payoff = np.where(levels < ki, coupon + levels - 100, coupon)
+        title = "Profil indicatif : reverse convertible"
+    else:
+        payoff = np.where(levels >= rappel, coupon, np.where(levels <= ki, levels - 100, coupon * 0.35))
+        title = "Profil indicatif : autocall"
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=levels,
+        y=payoff,
+        mode="lines",
+        line=dict(color=ACCENT, width=3),
+        fill="tozeroy",
+        fillcolor=_rgba(ACCENT, 0.10),
+        name="Payoff indicatif",
+    ))
+    fig.add_hline(y=0, line_color=BORDER, line_width=1)
+    if ptype not in ("capital_protected", "cln"):
+        fig.add_vline(x=ki, line_color=RED, line_dash="dash", line_width=1.4,
+                      annotation_text=f"KI {ki:.0f}%", annotation_font_color=RED, annotation_font_size=10)
+    if ptype == "autocall":
+        fig.add_vline(x=rappel, line_color=GREEN, line_dash="dash", line_width=1.4,
+                      annotation_text=f"Rappel {rappel:.0f}%", annotation_font_color=GREEN, annotation_font_size=10)
+    _chart(fig, height=height)
+    fig.update_layout(
+        title=dict(text=title, font=dict(color=TEXT, size=13)),
+        xaxis_title="Sous-jacent à maturité (% strike)",
+        yaxis_title="Payoff indicatif (%)",
+        showlegend=False,
+    )
+    return fig
+
+
+def _comparator_radar_fig(comp: pd.DataFrame) -> go.Figure:
+    categories = ["Coupon", "Protection", "Risque maîtrisé", "Maturité courte", "Simplicité"]
+    complexity = {"capital_protected": 75, "reverse_convertible": 55, "autocall": 45, "cln": 35}
+    fig = go.Figure()
+    for _, row in comp.iterrows():
+        score = int(_f(row.get("score_risque")))
+        days = max(_f(row.get("jours_restants")), 0)
+        values = [
+            min(_f(row.get("coupon_annuel_pct")) * 10, 100),
+            100 if row.get("type_produit") == "capital_protected" else max(0, 100 - score),
+            max(0, 100 - score),
+            max(10, 100 - min(days / 730 * 70, 90)),
+            complexity.get(row.get("type_produit"), 50),
+        ]
+        fig.add_trace(go.Scatterpolar(
+            r=values + [values[0]],
+            theta=categories + [categories[0]],
+            fill="toself",
+            name=str(row.get("nom", ""))[:28],
+        ))
+    fig.update_layout(
+        height=360,
+        paper_bgcolor="rgba(0,0,0,0)",
+        polar=dict(
+            bgcolor=BG,
+            radialaxis=dict(visible=True, range=[0, 100], gridcolor=BORDER, tickfont=dict(color=MUTED, size=9)),
+            angularaxis=dict(gridcolor=BORDER, tickfont=dict(color=MUTED, size=10)),
+        ),
+        legend=dict(bgcolor="rgba(0,0,0,0)", font=dict(color=MUTED, size=10), orientation="h", y=-0.12),
+        margin=dict(l=20, r=20, t=20, b=20),
+        font=dict(color=MUTED),
+    )
+    return fig
+
+
+def _family_pitch(row) -> tuple[str, str, str]:
+    t = row.get("type_produit")
+    if t == "cln":
+        return (
+            "Risque crédit",
+            _v(row.get("payoff_summary"), "Coupon conditionné à l’absence d’événement de crédit."),
+            _v(row.get("next_action"), "Valider la compréhension du risque de crédit."),
+        )
+    if t == "capital_protected":
+        return (
+            "Protection",
+            _v(row.get("payoff_summary"), "Capital protégé à échéance avec participation au sous-jacent."),
+            _v(row.get("next_action"), "Positionner auprès de profils prudents."),
+        )
+    if t == "reverse_convertible":
+        return (
+            "Rendement court terme",
+            _v(row.get("payoff_summary"), "Coupon élevé avec risque de livraison du sous-jacent."),
+            _v(row.get("next_action"), "Vérifier que le client accepte le sous-jacent en portefeuille."),
+        )
+    return (
+        "Coupon conditionnel",
+        _v(row.get("payoff_summary"), "Coupon potentiel et rappel automatique selon le niveau du sous-jacent."),
+        _v(row.get("next_action"), "Suivre la prochaine date d’observation."),
+    )
 
 
 # ── PAGE : Suivi Produits ─────────────────────────────────────────────────────
@@ -218,6 +341,25 @@ def page_suivi_produits(engine, market_df: pd.DataFrame):
     col_s, asc = sort_map[sort_f]
     disp = disp.sort_values(col_s, ascending=asc)
 
+    export_cols = [
+        "nom", "isin", "type_produit", "sous_jacent_1", "coupon_annuel_pct",
+        "date_echeance", "statut", "score_risque", "worst_of_pct",
+        "dist_barriere_ki_pct", "payoff_summary", "sales_argument",
+        "main_risk", "next_action",
+    ]
+    _download_csv(
+        "Exporter les produits filtrés",
+        disp[[c for c in export_cols if c in disp.columns]],
+        "produits_structures_filtres.csv",
+    )
+    risk_export = enriched[(enriched["score_risque"] >= 60) | (enriched["statut"].isin(["DANGER", "KI_DECLENCHE"]))]
+    if not risk_export.empty:
+        _download_csv(
+            "Exporter les produits à risque",
+            risk_export[[c for c in export_cols if c in risk_export.columns]],
+            "produits_a_risque.csv",
+        )
+
     for _, row in disp.iterrows():
         dist = _f(row.get("dist_barriere_ki_pct"))
         wof  = _f(row.get("worst_of_pct"))
@@ -238,6 +380,8 @@ def page_suivi_produits(engine, market_df: pd.DataFrame):
             perfs_html += f' <span style="color:{MUTED};">·</span> <span style="color:{p3c};font-weight:600;">{_f(row.get("perf_sj3_pct")):+.1f}%</span>'
 
         dur_pct = _f(row.get("duree_ecoulee_pct"))
+        pitch_title, payoff, action = _family_pitch(row)
+        main_risk = _v(row.get("main_risk"), _v(row.get("point_attention"), "Risque à préciser."))
 
         jr   = _f(row.get("jours_restants"))
         jr_s = f"{int(jr)}j restants" if jr > 0 else _v(row.get("date_echeance",""))
@@ -263,7 +407,9 @@ def page_suivi_produits(engine, market_df: pd.DataFrame):
             <div style="text-align:right;">
               {_badge(row['statut'])}
               <div style="margin-top:4px;font-size:11px;color:{score_c};">Score risque: {score}/100</div>
-              {_score_bar(score)}
+              <div style="width:100%;background:#1c2230;border-radius:4px;height:5px;overflow:hidden;">
+                <div style="width:{score}%;background:{score_c};height:100%;border-radius:4px;"></div>
+              </div>
             </div>
           </div>
           <div style="display:grid;grid-template-columns:repeat(6,1fr);gap:14px;font-size:12px;margin-bottom:12px;">
@@ -295,8 +441,22 @@ def page_suivi_produits(engine, market_df: pd.DataFrame):
             </div>
           </div>
           <div style="margin-bottom:8px;">
-            <div style="font-size:10px;color:{MUTED};margin-bottom:3px;">DISTANCE À LA BARRIÈRE KNOCK-IN</div>
+            <div style="font-size:10px;color:{MUTED};margin-bottom:3px;">{"RISQUE CRÉDIT" if row["type_produit"]=="cln" else "DISTANCE À LA BARRIÈRE KNOCK-IN"}</div>
             {ki_html}
+          </div>
+          <div style="display:grid;grid-template-columns:1.2fr 1.2fr 1fr;gap:10px;margin:10px 0 8px;font-size:11px;">
+            <div style="background:{BG_CARD2};border:1px solid {BORDER};border-radius:6px;padding:9px 10px;">
+              <div style="color:{ACCENT};font-weight:700;font-size:10px;text-transform:uppercase;margin-bottom:4px;">{pitch_title}</div>
+              <div style="color:{TEXT};line-height:1.35;">{payoff}</div>
+            </div>
+            <div style="background:{BG_CARD2};border:1px solid {BORDER};border-radius:6px;padding:9px 10px;">
+              <div style="color:{YELLOW};font-weight:700;font-size:10px;text-transform:uppercase;margin-bottom:4px;">Risque principal</div>
+              <div style="color:{TEXT};line-height:1.35;">{main_risk}</div>
+            </div>
+            <div style="background:{BG_CARD2};border:1px solid {BORDER};border-radius:6px;padding:9px 10px;">
+              <div style="color:{GREEN};font-weight:700;font-size:10px;text-transform:uppercase;margin-bottom:4px;">Action sales</div>
+              <div style="color:{TEXT};line-height:1.35;">{action}</div>
+            </div>
           </div>
           <div>
             <div style="font-size:10px;color:{MUTED};margin-bottom:3px;">DURÉE ÉCOULÉE</div>
@@ -457,7 +617,10 @@ def page_clients(engine, market_df: pd.DataFrame):
         return
 
     positions = positions.merge(
-        enriched[["produit_id", "statut", "dist_barriere_ki_pct", "worst_of_pct", "score_risque"]],
+        enriched[[
+            "produit_id", "statut", "dist_barriere_ki_pct", "worst_of_pct",
+            "score_risque", "point_attention"
+        ]],
         on="produit_id", how="left",
     )
 
@@ -557,16 +720,41 @@ def page_clients(engine, market_df: pd.DataFrame):
              <div style="color:{TEXT};font-weight:600;">{len(cp)}</div></div>
         <div><div style="color:{MUTED};font-size:10px;">SCORE RISQUE MAX</div>
              <div style="color:{score_cc};font-weight:700;">{score_c}/100</div>
-             {_score_bar(score_c)}</div>
+             <div style="width:100%;background:#1c2230;border-radius:4px;height:5px;overflow:hidden;">
+               <div style="width:{score_c}%;background:{score_cc};height:100%;border-radius:4px;"></div>
+             </div></div>
       </div>
     </div>
     """, unsafe_allow_html=True)
+
+    pitch_export = cp.copy()
+    pitch_export["adequation"] = pitch_export.apply(
+        lambda r: suitability_score(
+            r.get("profil"), r.get("type_produit"), int(_f(r.get("score_risque"))),
+            int(_f(r.get("jours_restants"))) if "jours_restants" in r else None,
+        )[1],
+        axis=1,
+    )
+    export_cols = [
+        "client", "profil", "segment", "produit", "type_produit",
+        "nominal_souscrit", "coupon_annuel_pct", "date_echeance",
+        "statut", "score_risque", "adequation", "main_risk", "next_action",
+    ]
+    _download_csv(
+        "Exporter la fiche client",
+        pitch_export[[c for c in export_cols if c in pitch_export.columns]],
+        f"fiche_client_{client_sel.replace(' ', '_')}.csv",
+    )
 
     for _, row in cp.sort_values("score_risque", ascending=False).iterrows():
         s_color = STATUT_COLOR.get(row.get("statut", "N/A"), MUTED)
         dist    = _f(row.get("dist_barriere_ki_pct"))
         sc      = int(_f(row.get("score_risque")))
         sc_c    = GREEN if sc < 30 else (YELLOW if sc < 60 else RED)
+        adequation_score, adequation_label = suitability_score(
+            row.get("profil"), row.get("type_produit"), sc, None
+        )
+        adequation_color = GREEN if adequation_label == "Adapté" else (YELLOW if adequation_label == "À discuter" else RED)
 
         st.markdown(f"""
         <div style="background:{BG_CARD2};border:1px solid {BORDER};
@@ -603,11 +791,296 @@ def page_clients(engine, market_df: pd.DataFrame):
             <div>
               <div style="color:{MUTED};font-size:10px;">SCORE RISQUE</div>
               <div style="color:{sc_c};font-weight:700;">{sc}/100</div>
-              {_score_bar(sc)}
+              <div style="width:100%;background:#1c2230;border-radius:4px;height:5px;overflow:hidden;">
+                <div style="width:{sc}%;background:{sc_c};height:100%;border-radius:4px;"></div>
+              </div>
             </div>
+          </div>
+          <div style="margin-top:10px;background:{BG_CARD};border:1px solid {BORDER};border-radius:6px;padding:8px 10px;font-size:11px;">
+            <span style="color:{adequation_color};font-weight:700;">Adéquation : {adequation_label} ({adequation_score}/100)</span>
+            <span style="color:{MUTED};"> · {_v(row.get('next_action'), _v(row.get('point_attention'), 'Action à qualifier'))}</span>
           </div>
         </div>
         """, unsafe_allow_html=True)
+
+
+def page_pitch_client(engine, market_df: pd.DataFrame):
+    _header("Pitch Client", "Préparer une recommandation commerciale adaptée au profil client")
+
+    positions = load_positions(engine)
+    products = load_products(engine)
+    enriched = enrich_products_with_market(products, market_df)
+    if positions.empty or enriched.empty:
+        st.warning("Données client ou produits indisponibles.")
+        return
+
+    clients = sorted(positions["client"].unique())
+    client_sel = st.selectbox("Client", clients)
+    cp = positions[positions["client"] == client_sel].copy()
+    profil = cp["profil"].iloc[0]
+    segment = cp["segment"].iloc[0]
+    encours = cp["nominal_souscrit"].sum()
+
+    scored = enriched.copy()
+    scored[["adequation_score", "adequation"]] = scored.apply(
+        lambda r: pd.Series(
+            suitability_score(
+                profil,
+                r.get("type_produit"),
+                int(_f(r.get("score_risque"))),
+                int(_f(r.get("jours_restants"))),
+            )
+        ),
+        axis=1,
+    )
+    already = set(cp["produit_id"].tolist())
+    candidates = scored[~scored["produit_id"].isin(already)].sort_values(
+        ["adequation_score", "coupon_annuel_pct"], ascending=[False, False]
+    )
+
+    risky = cp.merge(
+        enriched[["produit_id", "statut", "score_risque", "point_attention"]],
+        on="produit_id", how="left"
+    )
+    risky = risky[(risky["score_risque"] >= 60) | (risky["statut"].isin(["DANGER", "KI_DECLENCHE"]))]
+    cln_expo = cp[cp["type_produit"] == "cln"]["nominal_souscrit"].sum()
+    cln_pct = cln_expo / encours * 100 if encours else 0
+
+    c1, c2, c3, c4 = st.columns(4)
+    with c1: _kpi("Client", client_sel)
+    with c2: _kpi("Profil", str(profil).capitalize(), ACCENT)
+    with c3: _kpi("Encours", f"{encours/1000:.0f}k €", TEXT)
+    with c4: _kpi("Exposition CLN", f"{cln_pct:.0f}%", YELLOW if cln_pct > 30 else GREEN)
+
+    _sec("SYNTHÈSE SALES")
+    alerts = []
+    if not risky.empty:
+        alerts.append(f"{len(risky)} produit(s) à surveiller en priorité.")
+    if cln_pct > 35:
+        alerts.append("Exposition CLN élevée : éviter d'ajouter du risque crédit.")
+    if not alerts:
+        alerts.append("Portefeuille équilibré : possibilité d'étudier une nouvelle idée selon le profil.")
+
+    st.markdown(f"""
+    <div style="background:{BG_CARD};border:1px solid {BORDER};border-radius:10px;padding:14px 18px;margin-bottom:12px;">
+      <div style="color:{TEXT};font-size:13px;line-height:1.55;">{"<br>".join(alerts)}</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    col_a, col_b = st.columns([3, 2])
+    with col_a:
+        _sec("3 IDÉES PRODUITS À PRÉSENTER")
+        for _, row in candidates.head(3).iterrows():
+            color = GREEN if row["adequation"] == "Adapté" else YELLOW
+            _, payoff, action = _family_pitch(row)
+            pitch = generate_sales_pitch(
+                {"client": client_sel, "profil": profil, "segment": segment},
+                row,
+            )
+            st.markdown(f"""
+            <div style="background:{BG_CARD};border:1px solid {BORDER};border-left:3px solid {color};border-radius:9px;padding:13px 16px;margin-bottom:9px;">
+              <div style="display:flex;justify-content:space-between;gap:12px;">
+                <div>
+                  <div style="color:{TEXT};font-weight:700;font-size:13px;">{row['nom']}</div>
+                  <div style="color:{MUTED};font-size:11px;margin-top:2px;">{TYPE_LABEL.get(row['type_produit'], row['type_produit'])} · Coupon {row['coupon_annuel_pct']:.1f}% · Score risque {int(row['score_risque'])}/100</div>
+                </div>
+                <div style="color:{color};font-size:12px;font-weight:700;">{row['adequation']}<br>{int(row['adequation_score'])}/100</div>
+              </div>
+              <div style="color:{TEXT};font-size:11px;line-height:1.45;margin-top:8px;">{payoff}</div>
+              <div style="color:{ACCENT};font-size:11px;line-height:1.45;margin-top:5px;">Action : {action}</div>
+              <div style="background:{BG_CARD2};border:1px solid {BORDER};border-radius:6px;padding:8px 10px;margin-top:8px;color:{TEXT};font-size:11px;line-height:1.45;">
+                <span style="color:{GREEN};font-weight:700;">Pitch 30 sec :</span> {pitch}
+              </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+    with col_b:
+        _sec("À ÉVITER / SURVEILLER")
+        if risky.empty:
+            st.success("Aucune alerte majeure sur le portefeuille actuel.")
+        else:
+            for _, row in risky.sort_values("score_risque", ascending=False).iterrows():
+                st.markdown(f"""
+                <div style="background:{BG_CARD};border:1px solid {RED};border-radius:8px;padding:10px 12px;margin-bottom:8px;">
+                  <div style="color:{TEXT};font-size:12px;font-weight:700;">{row['produit']}</div>
+                  <div style="color:{RED};font-size:11px;margin-top:3px;">Score {int(_f(row.get('score_risque')))} · {_v(row.get('point_attention'), 'Surveillance requise')}</div>
+                </div>
+                """, unsafe_allow_html=True)
+
+    export = candidates.head(5)[[
+        "nom", "type_produit", "coupon_annuel_pct", "date_echeance",
+        "score_risque", "adequation_score", "adequation",
+        "payoff_summary", "sales_argument", "main_risk", "next_action",
+    ]].copy()
+    _download_csv("Exporter le pitch client", export, f"pitch_{client_sel.replace(' ', '_')}.csv")
+
+
+def page_meeting_pack(engine, market_df: pd.DataFrame):
+    _header("Meeting Pack", "Préparer un rendez-vous client avec visuels, alertes, idée produit et pitch")
+
+    positions = load_positions(engine)
+    products = load_products(engine)
+    enriched = enrich_products_with_market(products, market_df)
+    alerts = build_sales_alerts(positions, enriched, market_df)
+    if positions.empty or enriched.empty:
+        st.warning("Données client ou produits indisponibles.")
+        return
+
+    clients = sorted(positions["client"].unique())
+    client_sel = st.selectbox("Client à préparer", clients)
+    cp = positions[positions["client"] == client_sel].copy()
+    profil = cp["profil"].iloc[0]
+    segment = cp["segment"].iloc[0]
+    encours = float(cp["nominal_souscrit"].sum())
+
+    scored = enriched.copy()
+    scored[["adequation_score", "adequation"]] = scored.apply(
+        lambda r: pd.Series(
+            suitability_score(
+                profil,
+                r.get("type_produit"),
+                int(_f(r.get("score_risque"))),
+                int(_f(r.get("jours_restants"))),
+            )
+        ),
+        axis=1,
+    )
+    already = set(cp["produit_id"].tolist())
+    candidates = scored[~scored["produit_id"].isin(already)].sort_values(
+        ["adequation_score", "coupon_annuel_pct"],
+        ascending=[False, False],
+    )
+    selected_product = candidates.iloc[0] if not candidates.empty else scored.sort_values("score_risque").iloc[0]
+    pitch = generate_sales_pitch(
+        {"client": client_sel, "profil": profil, "segment": segment},
+        selected_product,
+    )
+
+    cp_enriched = cp.merge(
+        enriched[["produit_id", "score_risque", "statut", "point_attention", "dist_barriere_ki_pct"]],
+        on="produit_id",
+        how="left",
+    )
+    max_risk = int(_f(cp_enriched["score_risque"].max()))
+    client_alerts = alerts[alerts["client"] == client_sel].copy()
+    cln_expo = float(cp[cp["type_produit"] == "cln"]["nominal_souscrit"].sum())
+    cln_pct = cln_expo / encours * 100 if encours else 0
+
+    st.markdown(f"""
+<div style="background:{BG_CARD};border:1px solid {BORDER};border-radius:14px;padding:18px 22px;margin-bottom:16px;">
+  <div style="display:flex;justify-content:space-between;gap:20px;align-items:flex-start;">
+    <div>
+      <div style="color:{MUTED};font-size:10px;text-transform:uppercase;letter-spacing:.10em;">Pack rendez-vous</div>
+      <div style="color:{TEXT};font-size:24px;font-weight:800;margin-top:3px;">{client_sel}</div>
+      <div style="color:{MUTED};font-size:12px;margin-top:4px;">Profil {str(profil).capitalize()} · Segment {str(segment).capitalize()} · {len(cp)} produit(s) en portefeuille</div>
+    </div>
+    <div style="min-width:190px;">
+      <div style="color:{_risk_color(max_risk)};font-weight:800;text-align:right;">Risque max {max_risk}/100</div>
+      <div style="width:100%;background:#1c2230;border-radius:5px;height:7px;overflow:hidden;margin-top:6px;">
+        <div style="width:{max_risk}%;background:{_risk_color(max_risk)};height:100%;border-radius:5px;"></div>
+      </div>
+    </div>
+  </div>
+</div>
+""", unsafe_allow_html=True)
+
+    c1, c2, c3, c4 = st.columns(4)
+    with c1: _kpi("Encours client", f"{encours/1000:.0f}k €", ACCENT)
+    with c2: _kpi("Alertes", str(len(client_alerts)), RED if len(client_alerts) else GREEN)
+    with c3: _kpi("Exposition CLN", f"{cln_pct:.0f}%", YELLOW if cln_pct > 30 else GREEN)
+    with c4: _kpi("Idée top", f"{int(_f(selected_product.get('adequation_score')))} /100", GREEN)
+
+    st.markdown("<br>", unsafe_allow_html=True)
+    col_left, col_right = st.columns([1.25, 1])
+    with col_left:
+        _sec("PORTEFEUILLE CLIENT — ENCOURS ET RISQUE")
+        port = cp_enriched.groupby(["produit", "type_produit"]).agg(
+            nominal=("nominal_souscrit", "sum"),
+            score=("score_risque", "max"),
+        ).reset_index().sort_values("nominal", ascending=True)
+        fig = go.Figure(go.Bar(
+            x=port["nominal"] / 1000,
+            y=port["produit"].str[:36],
+            orientation="h",
+            marker_color=[_risk_color(int(_f(s))) for s in port["score"]],
+            text=(port["nominal"] / 1000).apply(lambda x: f"{x:.0f}k€"),
+            textposition="outside",
+            textfont=dict(color=TEXT, size=11),
+        ))
+        _chart(fig, height=max(280, len(port) * 58))
+        fig.update_layout(showlegend=False, xaxis_title="Nominal (k€)", yaxis_title="")
+        st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+
+    with col_right:
+        _sec("ALERTES À TRAITER")
+        if client_alerts.empty:
+            st.success("Aucune alerte majeure pour ce client.")
+        else:
+            for _, row in client_alerts.head(4).iterrows():
+                color = RED if row["priorite"] == "Haute" else YELLOW
+                st.markdown(f"""
+<div style="background:{BG_CARD};border:1px solid {BORDER};border-left:3px solid {color};border-radius:9px;padding:11px 13px;margin-bottom:8px;">
+  <div style="color:{color};font-size:11px;font-weight:800;">{row['priorite']}</div>
+  <div style="color:{TEXT};font-size:12px;font-weight:700;margin-top:2px;">{row['produit']}</div>
+  <div style="color:{MUTED};font-size:11px;margin-top:4px;line-height:1.4;">{row['raison']}</div>
+</div>
+""", unsafe_allow_html=True)
+
+    col_idea, col_payoff = st.columns([1, 1])
+    with col_idea:
+        _sec("IDÉE PRODUIT À PRÉSENTER")
+        score = int(_f(selected_product.get("score_risque")))
+        adequation = _v(selected_product.get("adequation"), "À qualifier")
+        st.markdown(f"""
+<div style="background:{BG_CARD};border:1px solid {BORDER};border-left:3px solid {GREEN};border-radius:10px;padding:15px 17px;margin-bottom:12px;">
+  <div style="display:flex;justify-content:space-between;gap:12px;">
+    <div>
+      <div style="color:{TEXT};font-weight:800;font-size:15px;">{selected_product['nom']}</div>
+      <div style="color:{MUTED};font-size:11px;margin-top:3px;">{TYPE_LABEL.get(selected_product['type_produit'], selected_product['type_produit'])} · {selected_product['sous_jacent_1']}</div>
+    </div>
+    <div style="color:{GREEN};font-weight:800;text-align:right;">{adequation}<br>{int(_f(selected_product.get('adequation_score')))} /100</div>
+  </div>
+  <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:13px;font-size:12px;">
+    <div><div style="color:{MUTED};font-size:10px;">COUPON</div><div style="color:{ACCENT};font-weight:800;">{_f(selected_product.get('coupon_annuel_pct')):.1f}%</div></div>
+    <div><div style="color:{MUTED};font-size:10px;">RISQUE</div><div style="color:{_risk_color(score)};font-weight:800;">{score}/100</div></div>
+    <div><div style="color:{MUTED};font-size:10px;">MATURITÉ</div><div style="color:{TEXT};font-weight:700;">{int(_f(selected_product.get('jours_restants')))}j</div></div>
+  </div>
+  <div style="color:{TEXT};font-size:12px;line-height:1.45;margin-top:12px;">{_v(selected_product.get('payoff_summary'))}</div>
+</div>
+""", unsafe_allow_html=True)
+        st.info(pitch)
+
+    with col_payoff:
+        _sec("PAYOFF VISUEL")
+        st.plotly_chart(_payoff_profile_fig(selected_product), use_container_width=True, config={"displayModeBar": False})
+
+    col_stress, col_export = st.columns([1.25, 1])
+    with col_stress:
+        _sec("STRESS TEST SYNTHÉTIQUE")
+        stress = stress_test_product(selected_product)
+        colors = [RED if v < 0 else GREEN for v in stress["perte_indicative_pct"]]
+        fig2 = go.Figure(go.Bar(
+            x=stress["scenario"],
+            y=stress["perte_indicative_pct"],
+            marker_color=colors,
+            text=stress["statut"],
+            textposition="outside",
+            textfont=dict(color=TEXT, size=10),
+        ))
+        _chart(fig2, height=280)
+        fig2.update_layout(showlegend=False, xaxis_title="Scénario sous-jacent", yaxis_title="Perte indicative (%)")
+        st.plotly_chart(fig2, use_container_width=True, config={"displayModeBar": False})
+
+    with col_export:
+        _sec("EXPORT RENDEZ-VOUS")
+        pack_rows = pd.DataFrame([
+            {"Bloc": "Client", "Synthèse": f"{client_sel} · profil {profil} · encours {encours/1000:.0f}k EUR"},
+            {"Bloc": "Alertes", "Synthèse": f"{len(client_alerts)} alerte(s) à traiter"},
+            {"Bloc": "Idée", "Synthèse": f"{selected_product['nom']} · coupon {_f(selected_product.get('coupon_annuel_pct')):.1f}% · risque {score}/100"},
+            {"Bloc": "Pitch", "Synthèse": pitch},
+        ])
+        st.dataframe(pack_rows, use_container_width=True, hide_index=True)
+        _download_csv("Exporter le meeting pack", pack_rows, f"meeting_pack_{client_sel.replace(' ', '_')}.csv")
 
 
 # ── PAGE : Screener ───────────────────────────────────────────────────────────
@@ -669,7 +1142,7 @@ def page_screener(market_df: pd.DataFrame, engine):
 
             # Recommandation selon profil
             if vol_v > 25 and rsi_v < 50:
-                reco = "Autocall ou Worst-Of — vol élevée = coupon attractif"
+                reco = "Autocall ou CLN — vol/spread élevés = coupon attractif"
                 reco_c = ACCENT
             elif vol_v < 15:
                 reco = "Capital Protégé — vol faible = protection abordable"
@@ -718,3 +1191,184 @@ def page_screener(market_df: pd.DataFrame, engine):
               </div>
             </div>
             """, unsafe_allow_html=True)
+
+
+def _product_card(row, extra_html: str = ""):
+    score = int(_f(row.get("score_risque")))
+    score_c = GREEN if score < 30 else (YELLOW if score < 60 else RED)
+    label = TYPE_LABEL.get(row.get("type_produit"), row.get("type_produit"))
+    extra_html = extra_html.strip()
+    card_html = f"""
+<div style="background:{BG_CARD};border:1px solid {BORDER};border-left:3px solid {score_c};
+            border-radius:10px;padding:14px 16px;margin-bottom:10px;">
+  <div style="display:flex;justify-content:space-between;gap:16px;">
+    <div>
+      <div style="color:{TEXT};font-size:14px;font-weight:800;">{row['nom']}</div>
+      <div style="color:{MUTED};font-size:11px;margin-top:2px;">{label} · {row['sous_jacent_1']} · Coupon {row['coupon_annuel_pct']:.1f}%</div>
+    </div>
+    <div style="min-width:120px;text-align:right;">
+      <div style="color:{score_c};font-weight:800;font-size:13px;">Risque {score}/100</div>
+      <div style="width:100%;background:#1c2230;border-radius:4px;height:5px;overflow:hidden;">
+        <div style="width:{score}%;background:{score_c};height:100%;border-radius:4px;"></div>
+      </div>
+    </div>
+  </div>
+  <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:12px;font-size:11px;">
+    <div style="background:{BG_CARD2};border:1px solid {BORDER};border-radius:6px;padding:8px;">
+      <div style="color:{ACCENT};font-weight:700;margin-bottom:4px;">Payoff</div>
+      <div style="color:{TEXT};line-height:1.35;">{_v(row.get('payoff_summary'), 'Payoff à qualifier')}</div>
+    </div>
+    <div style="background:{BG_CARD2};border:1px solid {BORDER};border-radius:6px;padding:8px;">
+      <div style="color:{YELLOW};font-weight:700;margin-bottom:4px;">Risque</div>
+      <div style="color:{TEXT};line-height:1.35;">{_v(row.get('main_risk'), _v(row.get('point_attention'), 'Risque à qualifier'))}</div>
+    </div>
+    <div style="background:{BG_CARD2};border:1px solid {BORDER};border-radius:6px;padding:8px;">
+      <div style="color:{GREEN};font-weight:700;margin-bottom:4px;">Action</div>
+      <div style="color:{TEXT};line-height:1.35;">{_v(row.get('next_action'), 'Action à définir')}</div>
+    </div>
+  </div>
+</div>
+"""
+    st.markdown(card_html, unsafe_allow_html=True)
+    if extra_html:
+        st.info(extra_html)
+
+
+def page_book_produits(engine, market_df: pd.DataFrame):
+    _header("Book Produits", "Bibliothèque commerciale avec recherche, filtres, pitch et stress tests")
+    enriched = enrich_products_with_market(load_products(engine), market_df)
+    if enriched.empty:
+        st.warning("Aucun produit disponible.")
+        return
+
+    c1, c2, c3 = st.columns([2, 2, 1])
+    query = c1.text_input("Recherche", placeholder="Nom, ISIN, sous-jacent...")
+    types = sorted(enriched["type_produit"].unique().tolist())
+    type_filter = c2.multiselect("Type produit", types, default=types)
+    max_risk = c3.slider("Risque max", 0, 100, 100)
+
+    filtered = enriched[enriched["type_produit"].isin(type_filter) & (enriched["score_risque"] <= max_risk)].copy()
+    if query:
+        q = query.lower()
+        filtered = filtered[
+            filtered["nom"].str.lower().str.contains(q, na=False)
+            | filtered["isin"].astype(str).str.lower().str.contains(q, na=False)
+            | filtered["sous_jacent_1"].astype(str).str.lower().str.contains(q, na=False)
+        ]
+
+    _download_csv("Exporter le book filtré", filtered, "book_produits.csv")
+    for _, row in filtered.sort_values(["type_produit", "score_risque"]).iterrows():
+        stress = stress_test_product(row)
+        pitch = generate_sales_pitch({"client": "un client cible", "profil": "equilibre"}, row)
+        extra = f"Pitch 30 sec : {pitch}"
+        _product_card(row, extra)
+        with st.expander(f"Stress tests — {row['nom']}"):
+            st.dataframe(stress, use_container_width=True, hide_index=True)
+
+
+def page_alertes_sales(engine, market_df: pd.DataFrame):
+    _header("Alertes Sales", "Clients à appeler aujourd’hui et actions recommandées")
+    positions = load_positions(engine)
+    enriched = enrich_products_with_market(load_products(engine), market_df)
+    alerts = build_sales_alerts(positions, enriched, market_df)
+    c1, c2, c3 = st.columns(3)
+    with c1: _kpi("Alertes", str(len(alerts)), RED if len(alerts) else GREEN)
+    with c2: _kpi("Priorité haute", str((alerts["priorite"] == "Haute").sum()) if not alerts.empty else "0", RED)
+    with c3: _kpi("Clients concernés", str(alerts["client"].nunique()) if not alerts.empty else "0", ACCENT)
+
+    if alerts.empty:
+        st.success("Aucune alerte sales majeure aujourd’hui.")
+        return
+    _download_csv("Exporter les alertes", alerts, "alertes_sales.csv")
+    for _, row in alerts.sort_values("priorite").iterrows():
+        color = RED if row["priorite"] == "Haute" else YELLOW
+        st.markdown(f"""
+        <div style="background:{BG_CARD};border:1px solid {BORDER};border-left:3px solid {color};
+                    border-radius:9px;padding:12px 14px;margin-bottom:8px;">
+          <div style="display:flex;justify-content:space-between;">
+            <div style="color:{TEXT};font-weight:800;">{row['client']} · {row['produit']}</div>
+            <div style="color:{color};font-weight:800;">{row['priorite']}</div>
+          </div>
+          <div style="color:{MUTED};font-size:12px;margin-top:5px;">{row['raison']}</div>
+          <div style="color:{ACCENT};font-size:12px;margin-top:5px;">Action : {row['action']}</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+
+def page_comparateur(engine, market_df: pd.DataFrame):
+    _header("Comparateur", "Comparer 2 à 3 idées produits pour préparer un rendez-vous")
+    enriched = enrich_products_with_market(load_products(engine), market_df)
+    names = enriched["nom"].tolist()
+    selected = st.multiselect("Produits à comparer", names, default=names[:3], max_selections=3)
+    comp = compare_products(enriched, selected)
+    if comp.empty:
+        st.info("Sélectionnez au moins un produit.")
+        return
+
+    c1, c2, c3 = st.columns(3)
+    with c1: _kpi("Produits comparés", str(len(comp)), ACCENT)
+    with c2: _kpi("Coupon max", f"{comp['coupon_annuel_pct'].max():.1f}%", GREEN)
+    with c3: _kpi("Risque min", f"{int(comp['score_risque'].min())}/100", _risk_color(int(comp["score_risque"].min())))
+
+    _download_csv("Exporter comparaison", comp, "comparaison_produits.csv")
+    col_a, col_b = st.columns([1.15, 1])
+    with col_a:
+        _sec("COUPON VS SCORE RISQUE")
+        fig = go.Figure()
+        fig.add_trace(go.Bar(x=comp["nom"], y=comp["coupon_annuel_pct"], name="Coupon (%)", marker_color=ACCENT))
+        fig.add_trace(go.Bar(x=comp["nom"], y=comp["score_risque"], name="Score risque", marker_color=RED))
+        _chart(fig, height=340)
+        fig.update_layout(barmode="group", yaxis_title="Coupon / Score", xaxis_title="Produit")
+        st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+
+    with col_b:
+        _sec("RADAR COMMERCIAL")
+        st.plotly_chart(_comparator_radar_fig(comp), use_container_width=True, config={"displayModeBar": False})
+
+    col_table, col_profile = st.columns([1.1, 1])
+    with col_table:
+        _sec("TABLE DE DÉCISION")
+        st.dataframe(comp, use_container_width=True, hide_index=True)
+    with col_profile:
+        _sec("PAYOFF DU PRODUIT SÉLECTIONNÉ")
+        focus_name = st.selectbox("Produit focus", comp["nom"].tolist())
+        focus = enriched[enriched["nom"] == focus_name].iloc[0]
+        st.plotly_chart(_payoff_profile_fig(focus), use_container_width=True, config={"displayModeBar": False})
+
+
+def page_dashboard_manager(engine, market_df: pd.DataFrame):
+    _header("Dashboard Manager", "Synthèse encours, risques et priorités commerciales")
+    positions = load_positions(engine)
+    enriched = enrich_products_with_market(load_products(engine), market_df)
+    positions = positions.merge(enriched[["produit_id", "score_risque", "statut"]], on="produit_id", how="left")
+    alerts = build_sales_alerts(load_positions(engine), enriched, market_df)
+    encours = positions["nominal_souscrit"].sum()
+    risk_encours = positions[positions["score_risque"] >= 60]["nominal_souscrit"].sum()
+    c1, c2, c3, c4 = st.columns(4)
+    with c1: _kpi("Encours total", f"{encours/1e6:.1f}M €", ACCENT)
+    with c2: _kpi("Encours à risque", f"{risk_encours/1e3:.0f}k €", RED if risk_encours else GREEN)
+    with c3: _kpi("Clients", str(positions["client_id"].nunique()), TEXT)
+    with c4: _kpi("Alertes sales", str(len(alerts)), RED if len(alerts) else GREEN)
+
+    col1, col2 = st.columns(2)
+    with col1:
+        _sec("ENCOURS PAR TYPE")
+        by_type = positions.groupby("type_produit")["nominal_souscrit"].sum().reset_index()
+        fig = go.Figure(go.Bar(
+            x=[TYPE_LABEL.get(t, t) for t in by_type["type_produit"]],
+            y=by_type["nominal_souscrit"] / 1000,
+            marker_color=CHART_C[:len(by_type)],
+            text=(by_type["nominal_souscrit"] / 1000).apply(lambda x: f"{x:.0f}k€"),
+            textposition="outside",
+        ))
+        _chart(fig, height=320)
+        fig.update_layout(showlegend=False, yaxis_title="k€")
+        st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+    with col2:
+        _sec("TOP CLIENTS À RAPPELER")
+        top = alerts.groupby("client").size().reset_index(name="alertes").sort_values("alertes", ascending=False).head(5) if not alerts.empty else pd.DataFrame(columns=["client", "alertes"])
+        st.dataframe(top, use_container_width=True, hide_index=True)
+
+    _sec("TOP PRODUITS À SURVEILLER")
+    watch = enriched.sort_values("score_risque", ascending=False).head(5)[["nom", "type_produit", "score_risque", "statut", "point_attention"]]
+    st.dataframe(watch, use_container_width=True, hide_index=True)

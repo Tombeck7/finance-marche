@@ -26,6 +26,14 @@ CREATE TABLE IF NOT EXISTS dim_produit_structure (
     nominal             REAL DEFAULT 100000,
     devise              TEXT DEFAULT 'EUR',
     actif               INTEGER DEFAULT 1,
+    reference_entity    TEXT,
+    recovery_rate_pct   REAL,
+    credit_spread_bps   REAL,
+    credit_event        TEXT,
+    payoff_summary      TEXT,
+    sales_argument      TEXT,
+    main_risk           TEXT,
+    next_action         TEXT,
     note                TEXT
 );
 

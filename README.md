@@ -1,17 +1,19 @@
-# Finance de marché — Python + SQL + Power BI
+# Entretien Tom Generali — Finance de marché
 
-Projet d'analyse des marchés financiers combinant trois briques :
+Application Streamlit de démonstration pour un poste d'assistant sales en produits structurés.
+Le projet combine Python, SQL et une interface web pour suivre les marchés, monitorer des produits structurés, préparer un pitch client et exporter des éléments commerciaux.
 
 | Couche      | Rôle                                              |
 |-------------|---------------------------------------------------|
-| **Python**  | Ingestion Yahoo Finance, calcul d'indicateurs     |
-| **SQL**     | Stockage structuré, vues analytiques              |
-| **Power BI**| Tableaux de bord interactifs (rendement, risque)  |
+| **Python**  | Ingestion Yahoo Finance, fallback démo, indicateurs, simulation Monte-Carlo |
+| **SQL**     | Stockage structuré des prix, indicateurs, produits, clients et positions |
+| **Streamlit** | Interface sales : marchés, produits structurés, pitch client et exports |
 
 ## Structure
 
 ```
 finance-marche/
+├── app.py           # Application Streamlit
 ├── python/          # Pipeline de données
 │   ├── src/         # Modules (ingestion, analytics, SQL)
 │   └── scripts/     # run_pipeline.py
@@ -19,9 +21,7 @@ finance-marche/
 │   ├── schema/      # Tables et vues
 │   ├── seed/        # Instruments de référence
 │   └── queries/     # Requêtes analytiques
-├── powerbi/
-│   ├── dax/         # Mesures DAX prêtes à l'emploi
-│   └── README.md    # Guide de connexion Power BI
+├── tests/           # Tests simples des calculs critiques
 └── data/            # Base SQLite + exports CSV
 ```
 
@@ -37,16 +37,17 @@ pip install -r requirements.txt
 # 2. Configuration (optionnel)
 copy config\settings.example.env .env
 
-# 3. Lancer le pipeline complet
-cd python
-python scripts\run_pipeline.py
+# 3. Lancer l'application
+streamlit run app.py
 ```
 
-Le pipeline :
+L'application :
 1. Crée la base SQLite (`data/finance_marche.db`)
-2. Télécharge 2 ans de cours (S&P 500, CAC 40, actions, ETF…)
-3. Calcule rendements, volatilité, SMA, RSI
-4. Alimente les tables SQL et la vue `vw_dashboard_marche`
+2. Essaie de télécharger 2 ans de cours via Yahoo Finance
+3. Bascule automatiquement en données démo si Yahoo Finance est indisponible
+4. Calcule rendements, volatilité, SMA, RSI
+5. Alimente les tables SQL et la vue `vw_dashboard_marche`
+6. Affiche les pages marchés, produits structurés, clients, pitch et exports
 
 ## Instruments suivis par défaut
 
@@ -57,20 +58,35 @@ Le pipeline :
 
 Modifiable dans `python/src/config.py` (`DEFAULT_TICKERS`).
 
-## Requêtes SQL utiles
+## Fonctionnalités métier
+
+- **Accueil** : objectif du projet, architecture Python/SQL/Streamlit, qualité des données.
+- **Vue Marché** : performances, rendements, derniers cours.
+- **Risque & Indicateurs** : volatilité, RSI, SMA50.
+- **Corrélations** : matrice de corrélation et corrélation glissante.
+- **Suivi Produits Structurés** : Autocalls, Reverse Convertibles, Capital Protégé, CLN.
+- **Vue Clients** : encours, expositions, alertes et fiche client exportable.
+- **Pitch Client** : recommandations commerciales selon profil, risque et adéquation.
+- **Screener** : idées produits selon volatilité, RSI et tendance.
+
+## Produits structurés couverts
+
+- Autocall
+- Reverse Convertible
+- Capital Protégé
+- CLN (Credit-Linked Note)
+
+## Tests
 
 ```powershell
-sqlite3 data/finance_marche.db < sql/queries/performance_par_actif.sql
-sqlite3 data/finance_marche.db < sql/queries/correlation_matrix.sql
+python tests\test_core.py
 ```
 
-## Power BI
+## Déploiement Streamlit Cloud
 
-Voir [powerbi/README.md](powerbi/README.md) pour connecter le rapport à la base et importer les mesures DAX.
+Le projet est compatible Streamlit Community Cloud :
 
-## Prochaines étapes possibles
-
-- Migration vers SQL Server pour DirectQuery en production
-- Ajout de données macro (taux, inflation) et de dérivés
-- Backtesting de stratégies dans Python
-- Publication sur Power BI Service avec actualisation planifiée
+- `app.py` est le point d'entrée
+- `requirements.txt` contient les dépendances Python
+- la base SQLite utilise `/tmp` automatiquement si le filesystem cloud est en lecture seule
+- Yahoo Finance est tenté en priorité, puis fallback démo

@@ -50,7 +50,10 @@ def load_positions(engine: Engine) -> pd.DataFrame:
             ps.sous_jacent_1, ps.sous_jacent_2, ps.sous_jacent_3,
             ps.strike_1, ps.strike_2, ps.strike_3,
             ps.barriere_ki_pct, ps.barriere_rappel_pct, ps.coupon_annuel_pct,
-            ps.date_emission, ps.date_echeance, ps.devise
+            ps.date_emission, ps.date_echeance, ps.devise,
+            ps.reference_entity, ps.recovery_rate_pct, ps.credit_spread_bps,
+            ps.credit_event, ps.payoff_summary, ps.sales_argument,
+            ps.main_risk, ps.next_action
         FROM fact_position_client p
         JOIN dim_client c  ON c.client_id  = p.client_id
         JOIN dim_produit_structure ps ON ps.produit_id = p.produit_id
@@ -99,12 +102,14 @@ def _duree_ecoulee_pct(date_emission: str, date_echeance: str) -> float:
 
 
 def _risk_score(statut: str, worst_of: float | None, vol_ann: float | None,
-                type_produit: str = "", coupon: float = 0.0) -> int:
+                type_produit: str = "", coupon: float = 0.0,
+                credit_spread_bps: float | None = None) -> int:
     """Score de risque 0-100 (plus haut = plus risqué)."""
     if type_produit == "cln":
-        # Pour un CLN, le risque est le risque de crédit proxié par le coupon
-        # Coupon élevé = spread élevé = risque crédit élevé
-        return min(int(10 + coupon * 4), 85)
+        # Pour un CLN, le risque est le risque crédit : spread > coupon si disponible.
+        spread_bonus = min((credit_spread_bps or 0) / 500 * 35, 35)
+        coupon_bonus = min(coupon * 3, 30)
+        return min(int(12 + spread_bonus + coupon_bonus), 85)
     base      = {"KI_DECLENCHE": 90, "DANGER": 70, "VIGILANCE": 45, "OK": 15, "N/A": 0}.get(statut, 0)
     vol_bonus = min((vol_ann or 0) / 50 * 20, 20)
     wof_bonus = max(0, -((worst_of or 0) / 100) * 10)
@@ -180,8 +185,14 @@ def enrich_products_with_market(
         coupon_acc = _coupon_accumule(p["date_emission"], p["coupon_annuel_pct"], p["date_echeance"])
         duree_pct  = _duree_ecoulee_pct(p["date_emission"], p["date_echeance"])
         next_obs   = _next_obs_date(p["date_emission"], p.get("periodicite_obs", "trimestrielle"))
-        score      = _risk_score(statut, worst_of, vol_sj1,
-                                 type_prod, float(p.get("coupon_annuel_pct") or 0))
+        score      = _risk_score(
+            statut,
+            worst_of,
+            vol_sj1,
+            type_prod,
+            float(p.get("coupon_annuel_pct") or 0),
+            float(p.get("credit_spread_bps") or 0),
+        )
 
         rows.append({
             **p.to_dict(),
@@ -202,9 +213,218 @@ def enrich_products_with_market(
             "duree_ecoulee_pct":   duree_pct,
             "prochaine_observation": next_obs,
             "score_risque":   score,
+            "point_attention": _point_attention(p.to_dict(), statut, worst_of, dist_ki),
         })
 
     return pd.DataFrame(rows)
+
+
+def _point_attention(product: dict, statut: str, worst_of: float | None, dist_ki: float | None) -> str:
+    type_prod = str(product.get("type_produit", ""))
+    if type_prod == "cln":
+        entity = product.get("reference_entity") or product.get("sous_jacent_1")
+        spread = product.get("credit_spread_bps")
+        return f"Suivre le risque crédit {entity} et le spread indicatif ({spread:.0f} bps)." if _notna(spread) else f"Suivre le risque crédit {entity}."
+    if type_prod == "capital_protected":
+        return "Mettre en avant la protection du capital, mais expliquer le risque d’opportunité."
+    if statut in ("DANGER", "KI_DECLENCHE"):
+        return f"Produit à surveiller en priorité : distance KI {dist_ki:.1f}%."
+    if worst_of is not None and worst_of < 0:
+        return f"Sous-jacent en baisse ({worst_of:.1f}%) : préparer un argument de suivi."
+    return "Produit en zone normale : suivi standard et prochaine observation."
+
+
+def suitability_score(profile: str, product_type: str, risk_score: int, maturity_days: int | None) -> tuple[int, str]:
+    """Score d'adéquation client-produit simple pour usage sales."""
+    profile = str(profile).lower()
+    type_penalty = {
+        "conservateur": {"capital_protected": 0, "cln": 12, "autocall": 25, "reverse_convertible": 30},
+        "equilibre": {"capital_protected": 0, "cln": 8, "autocall": 10, "reverse_convertible": 15},
+        "dynamique": {"capital_protected": 5, "cln": 0, "autocall": 0, "reverse_convertible": 5},
+    }.get(profile, {})
+    penalty = type_penalty.get(product_type, 15)
+    maturity_penalty = 0 if not maturity_days else min(max((maturity_days - 365) / 365 * 6, 0), 12)
+    score = max(0, min(100, int(100 - risk_score - penalty - maturity_penalty)))
+    if score >= 70:
+        label = "Adapté"
+    elif score >= 45:
+        label = "À discuter"
+    else:
+        label = "À éviter"
+    return score, label
+
+
+def profile_label(profile: str) -> str:
+    return {
+        "conservateur": "conservateur",
+        "equilibre": "équilibré",
+        "dynamique": "dynamique",
+    }.get(str(profile).lower(), str(profile))
+
+
+def generate_sales_pitch(client: dict | pd.Series, product: dict | pd.Series) -> str:
+    """Génère un pitch commercial court et structuré."""
+    c = client.to_dict() if hasattr(client, "to_dict") else dict(client)
+    p = product.to_dict() if hasattr(product, "to_dict") else dict(product)
+    score, label = suitability_score(
+        c.get("profil", "equilibre"),
+        p.get("type_produit", ""),
+        int(float(p.get("score_risque") or 0)),
+        int(float(p.get("jours_restants") or 0)) if p.get("jours_restants") is not None else None,
+    )
+    name = c.get("client") or f"{c.get('nom', '')} {c.get('prenom', '')}".strip() or "ce client"
+    product_name = p.get("nom") or p.get("produit") or "ce produit"
+    coupon = float(p.get("coupon_annuel_pct") or 0)
+    payoff = p.get("payoff_summary") or "Le produit offre une exposition structurée avec un couple rendement/risque défini."
+    risk = p.get("main_risk") or p.get("point_attention") or "Le principal risque doit être expliqué avant souscription."
+    action = p.get("next_action") or "Vérifier l’adéquation finale avec le profil et les objectifs du client."
+    return (
+        f"Pour {name}, profil {profile_label(c.get('profil', 'equilibre'))}, "
+        f"{product_name} est classé '{label}' avec un score d’adéquation de {score}/100. "
+        f"Le produit propose un coupon indicatif de {coupon:.1f}%/an. {payoff} "
+        f"Point de vigilance : {risk} Action recommandée : {action}"
+    )
+
+
+def stress_test_product(product: dict | pd.Series) -> pd.DataFrame:
+    """Stress tests simples sur le sous-jacent principal."""
+    p = product.to_dict() if hasattr(product, "to_dict") else dict(product)
+    base_perf = float(p.get("perf_sj1_pct") or 0)
+    ki = float(p.get("barriere_ki_pct") or 0)
+    rappel = float(p.get("barriere_rappel_pct") or 1)
+    coupon = float(p.get("coupon_annuel_pct") or 0)
+    ptype = str(p.get("type_produit", ""))
+    rows = []
+    for shock in [-30, -20, -10, 10]:
+        stressed_perf = base_perf + shock
+        level = 1 + stressed_perf / 100
+        if ptype == "cln":
+            statut = "Crédit inchangé"
+            resultat = f"Coupon {coupon:.1f}% conservé si aucun événement de crédit."
+            perte = 0.0
+        elif ptype == "capital_protected":
+            statut = "Capital protégé"
+            resultat = "Capital protégé à échéance ; risque d’opportunité."
+            perte = 0.0
+        elif level <= ki:
+            statut = "KI touché"
+            perte = min((level - 1) * 100, 0)
+            resultat = f"Risque de perte indicative {perte:.1f}% à maturité."
+        elif level >= rappel:
+            statut = "Rappel possible"
+            perte = 0.0
+            resultat = f"Rappel/coupon possible si observation à ce niveau ({coupon:.1f}%/an)."
+        else:
+            statut = "Zone intermédiaire"
+            perte = 0.0
+            resultat = "Pas de rappel immédiat, barrière non touchée."
+        rows.append({
+            "scenario": f"{shock:+.0f}%",
+            "perf_stressee_pct": round(stressed_perf, 1),
+            "niveau_pct_strike": round(level * 100, 1),
+            "statut": statut,
+            "perte_indicative_pct": round(perte, 1),
+            "commentaire": resultat,
+        })
+    return pd.DataFrame(rows)
+
+
+def build_sales_alerts(
+    positions: pd.DataFrame,
+    enriched: pd.DataFrame,
+    market: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    """Construit les alertes 'à appeler aujourd'hui'."""
+    if positions.empty or enriched.empty:
+        return pd.DataFrame(columns=["client", "produit", "priorite", "raison", "action"])
+    df = positions.merge(
+        enriched[[
+            "produit_id", "statut", "score_risque", "dist_barriere_ki_pct",
+            "jours_restants", "point_attention", "next_action", "type_produit"
+        ]],
+        on="produit_id",
+        how="left",
+        suffixes=("", "_enrich"),
+    )
+    alerts: list[dict] = []
+    for _, r in df.iterrows():
+        score = int(float(r.get("score_risque") or 0))
+        days = r.get("jours_restants")
+        days = int(float(days)) if pd.notna(days) else None
+        if r.get("statut") in ("DANGER", "KI_DECLENCHE") or score >= 70:
+            alerts.append({
+                "client": r["client"], "produit": r["produit"], "priorite": "Haute",
+                "raison": r.get("point_attention") or "Produit à risque élevé.",
+                "action": r.get("next_action") or "Appeler le client et préparer un point de suivi.",
+            })
+        if days is not None and 0 < days <= 60:
+            alerts.append({
+                "client": r["client"], "produit": r["produit"], "priorite": "Moyenne",
+                "raison": f"Échéance proche dans {days} jours.",
+                "action": "Préparer une idée de réinvestissement.",
+            })
+    if not df.empty:
+        cln = df[df["type_produit"] == "cln"].groupby("client")["nominal_souscrit"].sum()
+        total = df.groupby("client")["nominal_souscrit"].sum()
+        for client, cln_nominal in cln.items():
+            pct = cln_nominal / total.get(client, cln_nominal) * 100
+            if pct > 35:
+                alerts.append({
+                    "client": client, "produit": "Portefeuille CLN", "priorite": "Moyenne",
+                    "raison": f"Exposition CLN élevée ({pct:.0f}% de l'encours).",
+                    "action": "Éviter d'ajouter du risque crédit et proposer diversification.",
+                })
+        if market is not None and not market.empty and "date_cours" in market.columns:
+            last_market_date = pd.to_datetime(market["date_cours"]).max().date()
+            if last_market_date < date.today() - timedelta(days=5):
+                for client in sorted(df["client"].dropna().unique()):
+                    alerts.append({
+                        "client": client,
+                        "produit": "Données marché",
+                        "priorite": "Moyenne",
+                        "raison": f"Données obsolètes : dernière date disponible {last_market_date}.",
+                        "action": "Vérifier la source de marché avant d'appeler le client.",
+                    })
+    return pd.DataFrame(alerts).drop_duplicates() if alerts else pd.DataFrame(
+        columns=["client", "produit", "priorite", "raison", "action"]
+    )
+
+
+def compare_products(enriched: pd.DataFrame, product_names: list[str] | None = None) -> pd.DataFrame:
+    """Prépare une table de comparaison commerciale de 2 à 3 produits."""
+    if enriched.empty:
+        return pd.DataFrame()
+    comp = enriched.copy()
+    if product_names:
+        comp = comp[comp["nom"].isin(product_names)].copy()
+    if comp.empty:
+        return pd.DataFrame()
+
+    profile_by_type = {
+        "capital_protected": "conservateur",
+        "autocall": "équilibré / dynamique",
+        "reverse_convertible": "dynamique",
+        "cln": "dynamique crédit",
+    }
+    comp["profil_recommande"] = comp["type_produit"].map(profile_by_type).fillna("à qualifier")
+    columns = [
+        "nom",
+        "type_produit",
+        "profil_recommande",
+        "sous_jacent_1",
+        "coupon_annuel_pct",
+        "date_echeance",
+        "jours_restants",
+        "score_risque",
+        "statut",
+        "payoff_summary",
+        "main_risk",
+        "next_action",
+    ]
+    return comp[[c for c in columns if c in comp.columns]].sort_values(
+        ["score_risque", "coupon_annuel_pct"],
+        ascending=[True, False],
+    )
 
 
 # ── Simulateur Monte-Carlo ────────────────────────────────────────────────────

@@ -11,9 +11,14 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from src.db import init_database
+from src.ui.theme import (
+    ACCENT, BG, BG_CARD, BG_CARD2, BORDER, CHART_C,
+    GREEN, MUTED, PURPLE, RED, TEXT, YELLOW, rgba,
+)
 from src.structured.pages import (
-    page_suivi_produits, page_simulateur,
-    page_clients, page_screener,
+    page_alertes_sales, page_book_produits, page_comparateur,
+    page_dashboard_manager, page_suivi_produits, page_simulateur,
+    page_clients, page_screener, page_pitch_client, page_meeting_pack,
 )
 
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -21,21 +26,6 @@ st.set_page_config(
     page_title="Entretien Tom Generali", page_icon="📈",
     layout="wide", initial_sidebar_state="expanded",
 )
-
-# ── Palette ───────────────────────────────────────────────────────────────────
-BG       = "#0d1117"
-BG_CARD  = "#161b22"
-BG_CARD2 = "#1c2230"
-BORDER   = "#30363d"
-ACCENT   = "#58a6ff"
-GREEN    = "#3fb950"
-RED      = "#f85149"
-YELLOW   = "#d29922"
-TEXT     = "#e6edf3"
-MUTED    = "#8b949e"
-PURPLE   = "#bc8cff"
-
-CHART_C  = ["#58a6ff","#3fb950","#f78166","#d29922","#bc8cff","#39d353","#ff7b72","#ffa657"]
 
 # ── CSS ───────────────────────────────────────────────────────────────────────
 st.markdown(f"""
@@ -185,11 +175,7 @@ hr{{border-color:{BORDER} !important; margin:16px 0;}}
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 def _rgba(hex_color: str, alpha: float = 0.15) -> str:
-    h = hex_color.lstrip("#")
-    if len(h) == 6:
-        r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
-        return f"rgba({r},{g},{b},{alpha})"
-    return hex_color
+    return rgba(hex_color, alpha)
 
 
 def kpi(label: str, value: str, delta: float | None = None, color: str = TEXT):
@@ -240,31 +226,66 @@ def chart(fig: go.Figure, height: int = 400, **kw) -> go.Figure:
 
 
 # ── DB ────────────────────────────────────────────────────────────────────────
+def _set_meta(engine, **values) -> None:
+    from sqlalchemy import text
+    with engine.begin() as conn:
+        conn.execute(text("CREATE TABLE IF NOT EXISTS app_metadata (key TEXT PRIMARY KEY, value TEXT)"))
+        for key, value in values.items():
+            conn.execute(
+                text("""
+                    INSERT INTO app_metadata (key, value)
+                    VALUES (:key, :value)
+                    ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                """),
+                {"key": key, "value": "" if value is None else str(value)},
+            )
+
+
+def _get_meta(engine) -> dict[str, str]:
+    from sqlalchemy import text
+    with engine.begin() as conn:
+        conn.execute(text("CREATE TABLE IF NOT EXISTS app_metadata (key TEXT PRIMARY KEY, value TEXT)"))
+        rows = conn.execute(text("SELECT key, value FROM app_metadata")).fetchall()
+    return {r[0]: r[1] for r in rows}
+
+
 @st.cache_resource(show_spinner=False)
 def get_db():
     engine = init_database()
     from sqlalchemy import text
-    from datetime import date, timedelta
 
     with engine.connect() as conn:
         n        = conn.execute(text("SELECT COUNT(*) FROM fact_prix")).scalar()
         last_row = conn.execute(text("SELECT MAX(date_cours) FROM fact_prix")).scalar()
 
-    # Recharge si : vide OU données de plus de 5 jours
+    # Au démarrage, ne jamais bloquer l'interface sur Yahoo Finance.
+    # Si la base est vide, on seed immédiatement en données demo.
+    # Le bouton "Rafraîchir" tente Yahoo Finance explicitement.
     last_date  = pd.to_datetime(last_row).date() if last_row else None
-    data_stale = (last_date is None) or (last_date < date.today() - timedelta(days=5))
 
-    if n == 0 or data_stale:
+    if n == 0:
         from src.load_to_sql import load_prices
-        try:
-            from src.ingest.fetch_yfinance import fetch_market_data
-            df = fetch_market_data()
-            if df.empty:
-                raise ValueError("Yahoo Finance vide")
-            load_prices(engine, df)
-        except Exception:
-            from src.ingest.generate_demo_data import generate_demo_data
-            load_prices(engine, generate_demo_data(days=500))
+        from src.ingest.generate_demo_data import generate_demo_data
+        load_prices(engine, generate_demo_data(days=500))
+        _set_meta(
+            engine,
+            data_source="Données démo",
+            data_message="Démarrage rapide local : données démo. Utilisez Rafraîchir pour tenter Yahoo Finance.",
+            loaded_tickers="demo",
+            failed_tickers="",
+            last_refresh=str(pd.Timestamp.today().date()),
+        )
+    elif last_date is not None:
+        meta = _get_meta(engine)
+        if not meta.get("data_source"):
+            _set_meta(
+                engine,
+                data_source="Base locale",
+                data_message="Données déjà présentes en base locale.",
+                loaded_tickers="",
+                failed_tickers="",
+                last_refresh=str(last_date),
+            )
     return engine
 
 
@@ -288,17 +309,54 @@ def ensure_data(df: pd.DataFrame) -> pd.DataFrame:
     return load_data()
 
 
+def data_quality(df: pd.DataFrame, engine) -> dict[str, object]:
+    from datetime import timedelta
+    meta = _get_meta(engine)
+    if df.empty:
+        return {**meta, "rows": 0, "last_date": "N/A", "tickers": 0, "stale": True}
+    last_date = df["date_cours"].max().date()
+    stale = last_date < (pd.Timestamp.today().date() - timedelta(days=5))
+    return {
+        **meta,
+        "rows": int(len(df)),
+        "last_date": str(last_date),
+        "tickers": int(df["ticker"].nunique()),
+        "stale": bool(stale),
+    }
+
+
+def data_quality_banner(info: dict[str, object]):
+    source = info.get("data_source", "Source inconnue")
+    color = GREEN if source == "Yahoo Finance" and not info.get("stale") else YELLOW
+    msg = info.get("data_message", "")
+    st.markdown(f"""
+    <div style="background:{BG_CARD};border:1px solid {BORDER};border-left:3px solid {color};
+                border-radius:9px;padding:10px 14px;margin-bottom:16px;font-size:12px;">
+      <span style="color:{color};font-weight:700;">Données : {source}</span>
+      <span style="color:{MUTED};"> · Dernière date : {info.get('last_date','N/A')} · {info.get('tickers',0)} tickers · {info.get('rows',0)} lignes</span>
+      <div style="color:{MUTED};margin-top:3px;">{msg}</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+
 # ── Navigation ────────────────────────────────────────────────────────────────
 _NAV_ITEMS = [
+    ("page",   "🏠  Accueil"),
     ("header", "── Marchés"),
     ("page",   "📊  Vue Marché"),
     ("page",   "⚠️  Risque & Indicateurs"),
     ("page",   "🔗  Corrélations"),
     ("page",   "🕯️  Bougies"),
     ("header", "── Produits Structurés"),
+    ("page",   "📚  Book Produits"),
+    ("page",   "🚨  Alertes Sales"),
+    ("page",   "📊  Dashboard Manager"),
+    ("page",   "⚖️  Comparateur"),
     ("page",   "🛡️  Suivi Produits"),
     ("page",   "🎲  Simulateur Autocall"),
     ("page",   "👤  Vue Clients"),
+    ("page",   "🧾  Pitch Client"),
+    ("page",   "📦  Meeting Pack"),
     ("page",   "🔍  Screener"),
 ]
 
@@ -310,13 +368,15 @@ _NAME_REMAP  = {
 }
 
 # Valeurs par défaut session
-for _k, _v in [("nav_sel", "📊  Vue Marché"), ("nav_prev", "📊  Vue Marché")]:
+for _k, _v in [("nav_sel", "🏠  Accueil"), ("nav_prev", "🏠  Accueil")]:
     if _k not in st.session_state:
         st.session_state[_k] = _v
 
 
 def sidebar(df: pd.DataFrame):
     sb = st.sidebar
+    engine = get_db()
+    info = data_quality(df, engine)
 
     sb.markdown(f"""
     <div style="padding:22px 18px 14px;border-bottom:1px solid {BORDER};margin-bottom:10px;">
@@ -324,6 +384,16 @@ def sidebar(df: pd.DataFrame):
       <div style="font-size:13px;font-weight:700;color:{TEXT};margin-top:1px;">Generali</div>
       <div style="font-size:10px;color:{MUTED};margin-top:2px;">Finance de Marché · Produits Structurés</div>
     </div>""", unsafe_allow_html=True)
+
+    source_color = GREEN if info.get("data_source") == "Yahoo Finance" and not info.get("stale") else YELLOW
+    sb.markdown(f"""
+    <div style="margin:0 10px 12px;background:{BG_CARD};border:1px solid {BORDER};border-left:3px solid {source_color};
+                border-radius:8px;padding:9px 10px;font-size:11px;">
+      <div style="color:{source_color};font-weight:700;">{info.get('data_source','Source inconnue')}</div>
+      <div style="color:{MUTED};margin-top:2px;">Dernière date : {info.get('last_date','N/A')}</div>
+      <div style="color:{MUTED};">{info.get('tickers',0)} tickers · {info.get('rows',0)} lignes</div>
+    </div>
+    """, unsafe_allow_html=True)
 
     # ── Filtres ──
     sb.markdown(f'<div style="padding:0 10px 4px;font-size:10px;font-weight:700;color:{MUTED};text-transform:uppercase;letter-spacing:.08em;">Filtres marché</div>', unsafe_allow_html=True)
@@ -356,14 +426,33 @@ def sidebar(df: pd.DataFrame):
         from src.load_to_sql import load_prices
         with st.spinner("Téléchargement Yahoo Finance…"):
             try:
-                from src.ingest.fetch_yfinance import fetch_market_data
+                from src.ingest.fetch_yfinance import fetch_market_data, get_last_fetch_status
                 df = fetch_market_data()
                 if df.empty:
                     raise ValueError("vide")
-                load_prices(get_db(), df)
-            except Exception:
+                engine = get_db()
+                load_prices(engine, df)
+                status = get_last_fetch_status()
+                _set_meta(
+                    engine,
+                    data_source="Yahoo Finance",
+                    data_message=status.get("message", "Yahoo Finance OK"),
+                    loaded_tickers=",".join(status.get("loaded_tickers", [])),
+                    failed_tickers=",".join(status.get("failed_tickers", [])),
+                    last_refresh=str(pd.Timestamp.today().date()),
+                )
+            except Exception as exc:
                 from src.ingest.generate_demo_data import generate_demo_data
-                load_prices(get_db(), generate_demo_data(days=500))
+                engine = get_db()
+                load_prices(engine, generate_demo_data(days=500))
+                _set_meta(
+                    engine,
+                    data_source="Données démo",
+                    data_message=f"Fallback démo utilisé: {exc}",
+                    loaded_tickers="demo",
+                    failed_tickers="",
+                    last_refresh=str(pd.Timestamp.today().date()),
+                )
         st.cache_data.clear()
         st.cache_resource.clear()
         st.rerun()
@@ -377,6 +466,94 @@ def filter_df(df, tickers, dr):
         mask &= (df["date_cours"] >= pd.Timestamp(dr[0])) & \
                 (df["date_cours"] <= pd.Timestamp(dr[1]))
     return df[mask].sort_values(["ticker", "date_cours"])
+
+
+# ── PAGE : Accueil ────────────────────────────────────────────────────────────
+def page_accueil(df: pd.DataFrame, engine):
+    page_header("Entretien Tom Generali", "Démonstrateur Python, SQL et Streamlit pour assistant sales produits structurés")
+    info = data_quality(df, engine)
+    data_quality_banner(info)
+
+    c1, c2, c3, c4 = st.columns(4)
+    with c1: kpi("Source data", str(info.get("data_source", "N/A")), color=GREEN if info.get("data_source") == "Yahoo Finance" else YELLOW)
+    with c2: kpi("Dernière date", str(info.get("last_date", "N/A")))
+    with c3: kpi("Tickers", str(info.get("tickers", 0)), color=ACCENT)
+    with c4: kpi("Lignes SQL", f"{int(info.get('rows', 0)):,}".replace(",", " "), color=TEXT)
+
+    section("CE QUE DÉMONTRE LE PROJET")
+    st.markdown(f"""
+    <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-bottom:16px;">
+      <div style="background:{BG_CARD};border:1px solid {BORDER};border-radius:10px;padding:16px;">
+        <div style="color:{ACCENT};font-weight:800;margin-bottom:7px;">Python</div>
+        <div style="color:{TEXT};font-size:13px;line-height:1.5;">Ingestion Yahoo Finance, fallback démo, indicateurs techniques, simulation Monte-Carlo et scoring produits.</div>
+      </div>
+      <div style="background:{BG_CARD};border:1px solid {BORDER};border-radius:10px;padding:16px;">
+        <div style="color:{GREEN};font-weight:800;margin-bottom:7px;">SQL</div>
+        <div style="color:{TEXT};font-size:13px;line-height:1.5;">Base SQLite structurée : instruments, prix, indicateurs, clients, positions et catalogue de produits structurés.</div>
+      </div>
+      <div style="background:{BG_CARD};border:1px solid {BORDER};border-radius:10px;padding:16px;">
+        <div style="color:{YELLOW};font-weight:800;margin-bottom:7px;">Streamlit</div>
+        <div style="color:{TEXT};font-size:13px;line-height:1.5;">Interface sales : suivi marché, alertes produits, pitch client, exports et mise en ligne cloud.</div>
+      </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    section("FLUX DE DONNÉES")
+    st.markdown(f"""
+    <div style="background:{BG_CARD};border:1px solid {BORDER};border-radius:10px;padding:16px 18px;font-size:13px;color:{TEXT};line-height:1.7;">
+      Yahoo Finance → Python Pipeline → SQLite → Analytics produits → Streamlit → Assistant Sales<br>
+      <span style="color:{MUTED};">Si Yahoo Finance échoue, l'application bascule automatiquement vers des données démo et l'indique clairement.</span>
+    </div>
+    """, unsafe_allow_html=True)
+
+    section("QUALITÉ DES DONNÉES")
+    meta_loaded = [x for x in str(info.get("loaded_tickers", "")).split(",") if x]
+    meta_failed = [x for x in str(info.get("failed_tickers", "")).split(",") if x]
+    latest = (
+        df.sort_values("date_cours")
+        .groupby("ticker")
+        .last()
+        .reset_index()[["ticker", "date_cours", "close", "rendement_jour"]]
+        .copy()
+    )
+    latest["rendement_jour"] = (latest["rendement_jour"] * 100).round(2)
+    latest.columns = ["Ticker", "Dernière date", "Dernier cours", "Rend. jour (%)"]
+    c_quality, c_status = st.columns([3, 2])
+    with c_quality:
+        st.dataframe(latest, use_container_width=True, hide_index=True)
+    with c_status:
+        st.markdown(f"""
+        <div style="background:{BG_CARD};border:1px solid {BORDER};border-radius:10px;padding:14px 16px;font-size:12px;line-height:1.6;">
+          <div style="color:{GREEN};font-weight:700;margin-bottom:5px;">Tickers chargés</div>
+          <div style="color:{TEXT};">{", ".join(meta_loaded) if meta_loaded else "Non renseigné"}</div>
+          <div style="color:{RED};font-weight:700;margin:12px 0 5px;">Tickers échoués</div>
+          <div style="color:{TEXT};">{", ".join(meta_failed) if meta_failed else "Aucun"}</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    section("PAGES CLÉS")
+    st.markdown(f"""
+    <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:12px;">
+      <div style="background:{BG_CARD};border:1px solid {BORDER};border-radius:8px;padding:13px;color:{TEXT};font-size:13px;">Book Produits : recherche, fiche détaillée, pitch 30 secondes et stress tests.</div>
+      <div style="background:{BG_CARD};border:1px solid {BORDER};border-radius:8px;padding:13px;color:{TEXT};font-size:13px;">Alertes Sales : clients à appeler, raisons et actions recommandées.</div>
+      <div style="background:{BG_CARD};border:1px solid {BORDER};border-radius:8px;padding:13px;color:{TEXT};font-size:13px;">Meeting Pack : support rendez-vous client avec visuels, alertes, idée produit, payoff et pitch.</div>
+      <div style="background:{BG_CARD};border:1px solid {BORDER};border-radius:8px;padding:13px;color:{TEXT};font-size:13px;">Suivi Produits : barrières, CLN, risques et actions sales.</div>
+      <div style="background:{BG_CARD};border:1px solid {BORDER};border-radius:8px;padding:13px;color:{TEXT};font-size:13px;">Pitch Client : adéquation produit-profil, recommandations et exports.</div>
+      <div style="background:{BG_CARD};border:1px solid {BORDER};border-radius:8px;padding:13px;color:{TEXT};font-size:13px;">Screener : idées produits selon volatilité, RSI et tendance.</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    section("PARCOURS DÉMO ENTRETIEN")
+    st.markdown(f"""
+    <div style="background:{BG_CARD};border:1px solid {BORDER};border-radius:10px;padding:16px 18px;color:{TEXT};font-size:13px;line-height:1.7;">
+      <b style="color:{ACCENT};">1. Vue Marché</b> : montrer les données et indicateurs.<br>
+      <b style="color:{ACCENT};">2. Dashboard Manager</b> : identifier les priorités commerciales.<br>
+      <b style="color:{ACCENT};">3. Alertes Sales</b> : expliquer qui appeler et pourquoi.<br>
+      <b style="color:{ACCENT};">4. Book Produits</b> : choisir une idée, expliquer payoff, risque et stress tests.<br>
+      <b style="color:{ACCENT};">5. Meeting Pack</b> : montrer la fiche rendez-vous complète et exporter la synthèse.<br>
+      <span style="color:{MUTED};">Phrase entretien : “J’ai voulu construire un outil qui relie la donnée marché, la base SQL et le besoin concret d’un assistant sales : prioriser, expliquer et préparer un échange client.”</span>
+    </div>
+    """, unsafe_allow_html=True)
 
 
 # ── PAGE : Vue Marché ─────────────────────────────────────────────────────────
@@ -744,15 +921,24 @@ def main():
 
     df      = filter_df(df_raw, ticker_sel, date_range)
     engine  = get_db()
+    if page != "Accueil":
+        data_quality_banner(data_quality(df_raw, engine))
 
     ALL = {
+        "Accueil":                   lambda: page_accueil(df_raw, engine),
         "Vue Marché":                lambda: page_marche(df),
         "Risque & Indicateurs":      lambda: page_risque(df),
         "Corrélations":              lambda: page_correlations(df),
         "Bougies":                   lambda: page_bougie(df),
+        "Book Produits":             lambda: page_book_produits(engine, df_raw),
+        "Alertes Sales":             lambda: page_alertes_sales(engine, df_raw),
+        "Dashboard Manager":         lambda: page_dashboard_manager(engine, df_raw),
+        "Comparateur":               lambda: page_comparateur(engine, df_raw),
         "Suivi Produits Structurés": lambda: page_suivi_produits(engine, df_raw),
         "Simulateur Autocall":       lambda: page_simulateur(engine, df_raw),
         "Vue Clients":               lambda: page_clients(engine, df_raw),
+        "Pitch Client":              lambda: page_pitch_client(engine, df_raw),
+        "Meeting Pack":              lambda: page_meeting_pack(engine, df_raw),
         "Screener Sous-jacents":     lambda: page_screener(df_raw, engine),
     }
 

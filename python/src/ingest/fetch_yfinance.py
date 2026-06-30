@@ -9,6 +9,18 @@ import yfinance as yf
 
 from ..config import DEFAULT_TICKERS
 
+LAST_FETCH_STATUS: dict[str, object] = {
+    "source": "Yahoo Finance",
+    "loaded_tickers": [],
+    "failed_tickers": [],
+    "rows": 0,
+    "message": "",
+}
+
+
+def get_last_fetch_status() -> dict[str, object]:
+    return LAST_FETCH_STATUS.copy()
+
 
 def fetch_market_data(
     tickers: list[str] | None = None,
@@ -33,12 +45,21 @@ def fetch_market_data(
         auto_adjust=True,
         progress=False,
         threads=True,
+        timeout=8,
     )
 
     if raw.empty:
+        LAST_FETCH_STATUS.update({
+            "loaded_tickers": [],
+            "failed_tickers": tickers,
+            "rows": 0,
+            "message": "Yahoo Finance a retourné un DataFrame vide.",
+        })
         return pd.DataFrame()
 
     frames: list[pd.DataFrame] = []
+    loaded: list[str] = []
+    failed: list[str] = []
 
     for ticker in tickers:
         try:
@@ -49,6 +70,7 @@ def fetch_market_data(
                 elif ticker in raw.columns.get_level_values(0):
                     df = raw[ticker].copy()
                 else:
+                    failed.append(ticker)
                     continue
             else:
                 # Un seul ticker
@@ -65,6 +87,7 @@ def fetch_market_data(
                     break
 
             if "date_cours" not in df.columns:
+                failed.append(ticker)
                 continue
 
             df["ticker"]     = ticker
@@ -73,14 +96,31 @@ def fetch_market_data(
 
             if not df.empty:
                 frames.append(df)
+                loaded.append(ticker)
+            else:
+                failed.append(ticker)
 
-        except Exception:
+        except Exception as exc:
+            failed.append(ticker)
+            LAST_FETCH_STATUS["message"] = f"Dernière erreur sur {ticker}: {exc}"
             continue
 
     if not frames:
+        LAST_FETCH_STATUS.update({
+            "loaded_tickers": loaded,
+            "failed_tickers": failed or tickers,
+            "rows": 0,
+            "message": LAST_FETCH_STATUS.get("message") or "Aucun ticker exploitable.",
+        })
         return pd.DataFrame()
 
     result = pd.concat(frames, ignore_index=True)
+    LAST_FETCH_STATUS.update({
+        "loaded_tickers": loaded,
+        "failed_tickers": failed,
+        "rows": int(len(result)),
+        "message": f"{len(loaded)}/{len(tickers)} tickers chargés depuis Yahoo Finance.",
+    })
 
     # Sauvegarde CSV optionnelle (ignorée sur Streamlit Cloud)
     try:
