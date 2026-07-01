@@ -1543,4 +1543,9 @@ def page_dashboard_manager(engine, market_df: pd.DataFrame):
         with c_spark:
             sfig = _sparkline_fig(market_df, row["sous_jacent_1"], _risk_color(int(_f(row.get("score_risque")))))
             if sfig:
-                st.plotly_chart(sfig, use_container_width=True, config={"displayModeBar": False})
+                st.plotly_chart(
+                    sfig,
+                    use_container_width=True,
+                    config={"displayModeBar": False},
+                    key=f"dashboard_sparkline_{row['produit_id']}",
+                )
