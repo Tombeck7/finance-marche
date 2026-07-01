@@ -23,6 +23,7 @@ from .analytics import (
     suitability_score,
     upcoming_observations,
 )
+from .imports import import_client_positions, sample_client_positions_csv
 from src.ui.components import demo_banner, pitch_block
 
 # ── Palette ───────────────────────────────────────────────────────────────────
@@ -690,8 +691,52 @@ def page_simulateur(engine, market_df: pd.DataFrame):
 
 
 # ── PAGE : Vue Clients ────────────────────────────────────────────────────────
+def _client_import_panel(engine) -> None:
+    with st.expander("Importer clients / positions CSV", expanded=False):
+        st.caption(
+            "Colonnes attendues : nom, date_souscription, nominal_souscrit, "
+            "et produit_id ou isin ou produit. Optionnel : prenom, profil, segment, prix_souscription."
+        )
+        c_tpl, c_upload = st.columns([1, 2])
+        with c_tpl:
+            st.download_button(
+                "Télécharger modèle CSV",
+                data=sample_client_positions_csv(),
+                file_name="modele_import_clients_positions.csv",
+                mime="text/csv",
+                use_container_width=True,
+            )
+        with c_upload:
+            uploaded = st.file_uploader(
+                "Fichier CSV",
+                type=["csv"],
+                key="client_positions_csv",
+                label_visibility="collapsed",
+            )
+
+        if uploaded is not None:
+            try:
+                preview = pd.read_csv(uploaded, sep=None, engine="python")
+            except Exception as exc:
+                st.error(f"CSV illisible : {exc}")
+                return
+            st.dataframe(preview.head(20), use_container_width=True, hide_index=True)
+            if st.button("Importer dans la base", type="primary", use_container_width=True):
+                result = import_client_positions(engine, preview)
+                if result.errors:
+                    st.error(f"{len(result.errors)} erreur(s) détectée(s).")
+                    st.write(result.errors[:10])
+                if result.positions_upserted:
+                    st.success(
+                        f"{result.positions_upserted} position(s) importée(s) / mise(s) à jour, "
+                        f"{result.clients_created} client(s) créé(s)."
+                    )
+                    st.rerun()
+
+
 def page_clients(engine, market_df: pd.DataFrame):
     _header("Vue Clients", "Exposition par client, alertes risque et analyse de portefeuille")
+    _client_import_panel(engine)
 
     positions = load_positions(engine)
     enriched  = enrich_products_with_market(load_products(engine), market_df)

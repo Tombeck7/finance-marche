@@ -24,6 +24,7 @@ from src.structured.analytics import (
     suitability_score,
     upcoming_observations,
 )
+from src.structured.imports import import_client_positions
 
 
 def test_products_are_enriched_with_cln_fields():
@@ -126,10 +127,35 @@ def test_barrier_monitor_and_meeting_pack_html():
     assert html_doc.count("<html") == 1
 
 
+def test_import_client_positions_upserts_rows():
+    engine = init_database()
+    df = pd.DataFrame([
+        {
+            "nom": "ImportTest",
+            "prenom": "Client",
+            "profil": "equilibre",
+            "segment": "wealth",
+            "produit_id": 1,
+            "date_souscription": "2026-07-01",
+            "nominal_souscrit": 123000,
+        }
+    ])
+
+    result = import_client_positions(engine, df)
+    assert result.errors == []
+    assert result.positions_upserted == 1
+
+    positions = load_positions(engine)
+    imported = positions[positions["client"].str.contains("ImportTest", na=False)]
+    assert not imported.empty
+    assert float(imported.iloc[0]["nominal_souscrit"]) == 123000
+
+
 if __name__ == "__main__":
     test_products_are_enriched_with_cln_fields()
     test_suitability_respects_client_profiles()
     test_pitch_stress_and_alerts_are_generated()
     test_compare_products_returns_sales_columns()
     test_barrier_monitor_and_meeting_pack_html()
+    test_import_client_positions_upserts_rows()
     print("Tests OK")
