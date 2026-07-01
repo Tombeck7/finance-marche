@@ -31,7 +31,10 @@ def _parse_date(s) -> date | None:
 # ── Loaders ───────────────────────────────────────────────────────────────────
 def load_products(engine: Engine) -> pd.DataFrame:
     with engine.connect() as conn:
-        return pd.read_sql("SELECT * FROM dim_produit_structure WHERE actif=1", conn)
+        return pd.read_sql(
+            "SELECT * FROM dim_produit_structure WHERE actif=1 AND date(date_echeance) >= date('now')",
+            conn,
+        )
 
 
 def load_clients(engine: Engine) -> pd.DataFrame:
@@ -57,6 +60,9 @@ def load_positions(engine: Engine) -> pd.DataFrame:
         FROM fact_position_client p
         JOIN dim_client c  ON c.client_id  = p.client_id
         JOIN dim_produit_structure ps ON ps.produit_id = p.produit_id
+        WHERE c.actif = 1
+          AND ps.actif = 1
+          AND date(ps.date_echeance) >= date('now')
         """
         return pd.read_sql(q, conn)
 

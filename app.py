@@ -250,6 +250,51 @@ def _get_meta(engine) -> dict[str, str]:
     return {r[0]: r[1] for r in rows}
 
 
+def market_tickers(engine) -> list[str]:
+    """Tickers à charger : référentiel marché + sous-jacents du book produits."""
+    from sqlalchemy import text
+    with engine.connect() as conn:
+        rows = conn.execute(text("""
+            SELECT ticker FROM dim_instrument
+            UNION
+            SELECT sous_jacent_1 FROM dim_produit_structure WHERE sous_jacent_1 IS NOT NULL
+            UNION
+            SELECT sous_jacent_2 FROM dim_produit_structure WHERE sous_jacent_2 IS NOT NULL
+            UNION
+            SELECT sous_jacent_3 FROM dim_produit_structure WHERE sous_jacent_3 IS NOT NULL
+        """)).fetchall()
+    return sorted({r[0] for r in rows if r[0]})
+
+
+def refresh_yahoo_prices(engine, *, reason: str) -> tuple[bool, str]:
+    """Charge Yahoo sans fallback destructif. Retourne (succès, message)."""
+    from src.ingest.fetch_yfinance import fetch_market_data, get_last_fetch_status
+    from src.load_to_sql import load_prices
+
+    tickers = market_tickers(engine)
+    df = fetch_market_data(tickers=tickers)
+    status = get_last_fetch_status()
+    if df.empty:
+        message = status.get("message", "Yahoo Finance indisponible.")
+        _set_meta(
+            engine,
+            data_message=f"{reason}: échec Yahoo Finance — données existantes conservées. {message}",
+            failed_tickers=",".join(status.get("failed_tickers", tickers)),
+        )
+        return False, str(message)
+
+    load_prices(engine, df)
+    _set_meta(
+        engine,
+        data_source="Yahoo Finance",
+        data_message=status.get("message", f"{reason}: Yahoo Finance OK"),
+        loaded_tickers=",".join(status.get("loaded_tickers", [])),
+        failed_tickers=",".join(status.get("failed_tickers", [])),
+        last_refresh=str(status.get("latest_date") or pd.Timestamp.today().date()),
+    )
+    return True, str(status.get("message", "Yahoo Finance OK"))
+
+
 @st.cache_resource(show_spinner=False)
 def get_db():
     engine = init_database()
@@ -259,23 +304,22 @@ def get_db():
         n        = conn.execute(text("SELECT COUNT(*) FROM fact_prix")).scalar()
         last_row = conn.execute(text("SELECT MAX(date_cours) FROM fact_prix")).scalar()
 
-    # Au démarrage, ne jamais bloquer l'interface sur Yahoo Finance.
-    # Si la base est vide, on seed immédiatement en données demo.
-    # Le bouton "Rafraîchir" tente Yahoo Finance explicitement.
     last_date  = pd.to_datetime(last_row).date() if last_row else None
 
     if n == 0:
         from src.load_to_sql import load_prices
         from src.ingest.generate_demo_data import generate_demo_data
-        load_prices(engine, generate_demo_data(days=500))
-        _set_meta(
-            engine,
-            data_source="Données démo",
-            data_message="Démarrage rapide local : données démo. Utilisez Rafraîchir pour tenter Yahoo Finance.",
-            loaded_tickers="demo",
-            failed_tickers="",
-            last_refresh=str(pd.Timestamp.today().date()),
-        )
+        ok, msg = refresh_yahoo_prices(engine, reason="Démarrage")
+        if not ok:
+            load_prices(engine, generate_demo_data(days=500))
+            _set_meta(
+                engine,
+                data_source="Données démo",
+                data_message=f"Yahoo Finance indisponible au démarrage ({msg}). Fallback démo explicite.",
+                loaded_tickers="demo",
+                failed_tickers="",
+                last_refresh=str(pd.Timestamp.today().date()),
+            )
     elif last_date is not None:
         meta = _get_meta(engine)
         if not meta.get("data_source"):
@@ -354,35 +398,20 @@ def data_quality_banner(info: dict[str, object]):
 
 
 def try_auto_refresh(df: pd.DataFrame, engine) -> None:
-    """Tente un refresh Yahoo au démarrage si les cours sont obsolètes (non bloquant)."""
+    """Tente un refresh Yahoo si les cours sont obsolètes ou en mode démo."""
     if st.session_state.get("auto_refresh_tried"):
         return
     st.session_state["auto_refresh_tried"] = True
     meta = _get_meta(engine)
-    if meta.get("data_source") == "Données démo" or df.empty:
+    is_demo = meta.get("data_source") == "Données démo"
+    last_date = pd.to_datetime(df["date_cours"].max()).date() if not df.empty else None
+    if not is_demo and last_date and last_date >= pd.Timestamp.today().date() - pd.Timedelta(days=1):
         return
-    last_date = pd.to_datetime(df["date_cours"].max()).date()
-    if last_date >= pd.Timestamp.today().date() - pd.Timedelta(days=1):
-        return
-    try:
-        from src.load_to_sql import load_prices
-        from src.ingest.fetch_yfinance import fetch_market_data, get_last_fetch_status
-        new_df = fetch_market_data()
-        if new_df.empty:
-            return
-        load_prices(engine, new_df)
-        status = get_last_fetch_status()
-        _set_meta(
-            engine,
-            data_source="Yahoo Finance",
-            data_message=status.get("message", "Auto-refresh Yahoo Finance OK"),
-            loaded_tickers=",".join(status.get("loaded_tickers", [])),
-            failed_tickers=",".join(status.get("failed_tickers", [])),
-            last_refresh=str(status.get("latest_date") or pd.Timestamp.today().date()),
-        )
+    ok, msg = refresh_yahoo_prices(engine, reason="Auto-refresh")
+    if ok:
         st.cache_data.clear()
-    except Exception:
-        pass
+    else:
+        _set_meta(engine, data_message=f"Auto-refresh non disponible — données existantes conservées. {msg}")
 
 
 # ── Navigation ────────────────────────────────────────────────────────────────
@@ -473,41 +502,13 @@ def sidebar(df: pd.DataFrame):
 
     sb.markdown(f'<hr style="border-color:{BORDER};margin:12px 0 8px;"/>', unsafe_allow_html=True)
     if sb.button("Rafraîchir les données"):
-        from src.load_to_sql import load_prices
         with st.spinner("Téléchargement Yahoo Finance…"):
-            try:
-                from src.ingest.fetch_yfinance import fetch_market_data, get_last_fetch_status
-                df = fetch_market_data()
-                if df.empty:
-                    raise ValueError("vide")
-                engine = get_db()
-                load_prices(engine, df)
-                status = get_last_fetch_status()
-                failed = status.get("failed_tickers", [])
-                if failed:
-                    st.sidebar.warning(f"Tickers en échec : {', '.join(failed)}")
-                _set_meta(
-                    engine,
-                    data_source="Yahoo Finance",
-                    data_message=status.get("message", "Yahoo Finance OK"),
-                    loaded_tickers=",".join(status.get("loaded_tickers", [])),
-                    failed_tickers=",".join(status.get("failed_tickers", [])),
-                    last_refresh=str(status.get("latest_date") or pd.Timestamp.today().date()),
-                )
-            except Exception as exc:
-                from src.ingest.generate_demo_data import generate_demo_data
-                engine = get_db()
-                load_prices(engine, generate_demo_data(days=500))
-                _set_meta(
-                    engine,
-                    data_source="Données démo",
-                    data_message=f"Fallback démo utilisé: {exc}",
-                    loaded_tickers="demo",
-                    failed_tickers="",
-                    last_refresh=str(pd.Timestamp.today().date()),
-                )
+            ok, msg = refresh_yahoo_prices(get_db(), reason="Refresh manuel")
+            if ok:
+                st.sidebar.success("Données Yahoo Finance mises à jour.")
+            else:
+                st.sidebar.error(f"Yahoo Finance indisponible : {msg}")
         st.cache_data.clear()
-        st.cache_resource.clear()
         st.rerun()
 
     return sel, dr, page

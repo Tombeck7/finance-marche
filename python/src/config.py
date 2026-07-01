@@ -39,6 +39,6 @@ DATA_PROCESSED = ROOT / "data" / "processed"
 
 DEFAULT_TICKERS = [
     "^GSPC", "^FCHI", "^STOXX50E",
-    "AAPL", "MSFT", "BNP.PA", "MC.PA",
+    "AAPL", "MSFT", "BNP.PA", "MC.PA", "TTE.PA",
     "SPY", "CAC.PA", "EURUSD=X",
 ]

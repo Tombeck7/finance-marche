@@ -452,6 +452,15 @@ def page_suivi_produits(engine, market_df: pd.DataFrame):
         dur_pct = _f(row.get("duree_ecoulee_pct"))
         pitch_title, payoff, action = _family_pitch(row)
         main_risk = _v(row.get("main_risk"), _v(row.get("point_attention"), "Risque à préciser."))
+        if row["type_produit"] == "cln":
+            barrier_label = "RECOUVREMENT"
+            barrier_value = f"{_f(row.get('recovery_rate_pct'), _f(row.get('barriere_ki_pct')) * 100):.0f}%"
+        elif row["type_produit"] == "capital_protected":
+            barrier_label = "PROTECTION"
+            barrier_value = "100%"
+        else:
+            barrier_label = "DIST. KI"
+            barrier_value = f"{dist:.1f}%"
 
         jr   = _f(row.get("jours_restants"))
         jr_s = f"{int(jr)}j restants" if jr > 0 else _v(row.get("date_echeance",""))
@@ -492,9 +501,9 @@ def page_suivi_produits(engine, market_df: pd.DataFrame):
               <div style="color:{wof_c};font-weight:700;">{wof:+.1f}%</div>
             </div>
             <div>
-              <div style="color:{MUTED};font-size:10px;margin-bottom:3px;">{"RECOUVREMENT" if row["type_produit"]=="cln" else "DIST. KI"}</div>
+              <div style="color:{MUTED};font-size:10px;margin-bottom:3px;">{barrier_label}</div>
               <div style="color:{STATUT_COLOR.get(row['statut'],MUTED)};font-weight:700;">
-                {"N/A" if row["type_produit"] in ("capital_protected","cln") else f"{dist:.1f}%"}
+                {barrier_value}
               </div>
             </div>
             <div>

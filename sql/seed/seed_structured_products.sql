@@ -1,11 +1,7 @@
 -- Seed produits structurés — IDs explicites
--- Recrée la table pour mettre à jour la contrainte CHECK (SQLite ne supporte pas ALTER CONSTRAINT)
-DROP TABLE IF EXISTS fact_position_client;
-DROP TABLE IF EXISTS fact_observation_autocall;
-DROP TABLE IF EXISTS dim_produit_structure;
-DROP TABLE IF EXISTS dim_client;
+-- Idempotent : ne détruit jamais les données métier déjà saisies/importées.
 
-CREATE TABLE dim_produit_structure (
+CREATE TABLE IF NOT EXISTS dim_produit_structure (
     produit_id          INTEGER PRIMARY KEY AUTOINCREMENT,
     nom                 TEXT NOT NULL,
     isin                TEXT,
@@ -39,7 +35,7 @@ CREATE TABLE dim_produit_structure (
     note                TEXT
 );
 
-CREATE TABLE dim_client (
+CREATE TABLE IF NOT EXISTS dim_client (
     client_id   INTEGER PRIMARY KEY AUTOINCREMENT,
     nom         TEXT NOT NULL,
     prenom      TEXT,
@@ -48,7 +44,7 @@ CREATE TABLE dim_client (
     actif       INTEGER DEFAULT 1
 );
 
-CREATE TABLE fact_position_client (
+CREATE TABLE IF NOT EXISTS fact_position_client (
     position_id         INTEGER PRIMARY KEY AUTOINCREMENT,
     client_id           INTEGER NOT NULL,
     produit_id          INTEGER NOT NULL,
@@ -60,7 +56,7 @@ CREATE TABLE fact_position_client (
     UNIQUE (client_id, produit_id)
 );
 
-CREATE TABLE fact_observation_autocall (
+CREATE TABLE IF NOT EXISTS fact_observation_autocall (
     obs_id              INTEGER PRIMARY KEY AUTOINCREMENT,
     produit_id          INTEGER NOT NULL,
     date_observation    TEXT NOT NULL,
@@ -79,7 +75,7 @@ CREATE TABLE fact_observation_autocall (
 );
 
 -- type_produit : autocall | reverse_convertible | capital_protected | cln
-INSERT INTO dim_produit_structure
+INSERT OR IGNORE INTO dim_produit_structure
   (produit_id, nom, isin, type_produit,
    sous_jacent_1, sous_jacent_2, sous_jacent_3,
    strike_1,  strike_2, strike_3,
@@ -172,7 +168,7 @@ VALUES
    'Limiter la taille de position et vérifier les expositions sectorielles existantes.',
    'Coupon 7% — risque de crédit sur TotalEnergies. Taux de recouvrement estimé 40%');
 
-INSERT INTO dim_client (client_id, nom, prenom, profil, segment) VALUES
+INSERT OR IGNORE INTO dim_client (client_id, nom, prenom, profil, segment) VALUES
 (1, 'Dupont',  'Jean',    'equilibre',    'wealth'),
 (2, 'Martin',  'Sophie',  'dynamique',    'wealth'),
 (3, 'Bernard', 'Pierre',  'conservateur', 'retail'),
@@ -181,7 +177,7 @@ INSERT INTO dim_client (client_id, nom, prenom, profil, segment) VALUES
 (6, 'Petit',   'Claire',  'conservateur', 'retail'),
 (7, 'Simon',   'Thomas',  'dynamique',    'wealth');
 
-INSERT INTO fact_position_client (client_id, produit_id, date_souscription, nominal_souscrit) VALUES
+INSERT OR IGNORE INTO fact_position_client (client_id, produit_id, date_souscription, nominal_souscrit) VALUES
 (1, 1, '2024-03-15', 200000),
 (1, 7, '2024-09-01', 150000),
 (2, 3, '2024-01-15', 100000),
