@@ -547,7 +547,7 @@ def page_accueil(df: pd.DataFrame, engine):
     """, unsafe_allow_html=True)
     bc1, bc2, bc3, bc4, bc5 = st.columns(5)
     demo_pages = ["Meeting Pack", "Comparateur", "Book Produits", "Dashboard Manager", "Meeting Pack"]
-    for col, (label, step) in zip([bc1, bc2, bc3, bc4, bc5], enumerate(demo_pages)):
+    for col, (step, label) in zip([bc1, bc2, bc3, bc4, bc5], enumerate(demo_pages)):
         with col:
             if st.button(label, key=f"demo_nav_{step}", use_container_width=True):
                 st.session_state["demo_mode"] = True
